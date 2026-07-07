@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { gasApi } from '../api';
-import { StudentSubmission, PredefinedText } from '../types';
+import { StudentSubmission, PredefinedText, WatermarkSettings } from '../types';
 import CanvasEditor from './CanvasEditor';
 import {
   ArrowLeft,
@@ -35,7 +35,8 @@ import {
   Sparkles,
   ZoomIn,
   ZoomOut,
-  Maximize
+  Maximize,
+  Plus
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -85,6 +86,8 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
   const [stickersList, setStickersList] = useState<string[]>([]);
   const [stickerImages, setStickerImages] = useState<Record<string, string>>({});
   const [additionalHeaders, setAdditionalHeaders] = useState<string[]>([]);
+  const [watermarkSettings, setWatermarkSettings] = useState<WatermarkSettings | null>(null);
+  const [watermarkLogoBase64, setWatermarkLogoBase64] = useState<string | null>(null);
 
   // Workspace controls state
   const [toolGroup, setToolGroup] = useState<'draw' | 'textSticker' | 'other'>('draw');
@@ -106,9 +109,8 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
   const [imageGrade, setImageGrade] = useState('');
   const [audioGrade, setAudioGrade] = useState('');
   const [notes, setNotes] = useState('');
-  const [showForms, setShowForms] = useState(true);
-  const [showAudioForms, setShowAudioForms] = useState(true);
-  const [showAudioInfo, setShowAudioInfo] = useState(false);
+  const [showForms, setShowForms] = useState(false);
+  const [showAudioForms, setShowAudioForms] = useState(false);
   const [showAudioFeedbackPanel, setShowAudioFeedbackPanel] = useState(false);
 
   // Custom Zoom Scale state
@@ -117,6 +119,7 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
   // Custom Uploads state
   const [showUploads, setShowUploads] = useState(false);
   const [additionalImage, setAdditionalImage] = useState<string | null>(null);
+  const [additionalImages, setAdditionalImages] = useState<string[]>([]);
   const [additionalVideo, setAdditionalVideo] = useState<string | null>(null);
   const [additionalAudio, setAdditionalAudio] = useState<string | null>(null);
 
@@ -137,6 +140,12 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
   const [videoStream, setVideoStream] = useState<MediaStream | null>(null);
 
   const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
+  const videoPreviewRefCallback = (el: HTMLVideoElement | null) => {
+    videoPreviewRef.current = el;
+    if (el && videoStream) {
+      el.srcObject = videoStream;
+    }
+  };
 
   // Student Audio Player states
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -152,6 +161,12 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
   // Camera capture states for photo
   const [isPhotoCameraOpen, setIsPhotoCameraOpen] = useState(false);
   const photoCameraRef = useRef<HTMLVideoElement | null>(null);
+  const photoCameraRefCallback = (el: HTMLVideoElement | null) => {
+    photoCameraRef.current = el;
+    if (el && photoCameraStream) {
+      el.srcObject = photoCameraStream;
+    }
+  };
   const [photoCameraStream, setPhotoCameraStream] = useState<MediaStream | null>(null);
 
   // Active sub-tab for response channels in audio-only correction page
@@ -174,21 +189,60 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
     loadWorkspace();
   }, [submission]);
 
+  useEffect(() => {
+    if (videoStream && videoPreviewRef.current) {
+      videoPreviewRef.current.srcObject = videoStream;
+    }
+  }, [videoStream, recordingVideo]);
+
+  useEffect(() => {
+    if (photoCameraStream && photoCameraRef.current) {
+      photoCameraRef.current.srcObject = photoCameraStream;
+    }
+  }, [photoCameraStream, isPhotoCameraOpen]);
+
   const loadWorkspace = async () => {
     try {
       setLoading(true);
       setError(null);
 
       // Load static settings in parallel
-      const [texts, stickers, headers] = await Promise.all([
+      const [texts, stickers, headers, watermarkConf] = await Promise.all([
         gasApi.getPredefinedTexts(),
         gasApi.getStickerUrls(),
-        gasApi.getAdditionalHeaders()
+        gasApi.getAdditionalHeaders(),
+        gasApi.getWatermarkSettings()
       ]);
 
       setPredefinedTexts(texts);
       setStickersList(stickers);
       setAdditionalHeaders(headers);
+
+      // Check for local storage watermark settings override
+      const savedLocalWatermark = localStorage.getItem('localWatermarkSettings');
+      let finalWatermarkConf = watermarkConf;
+      if (savedLocalWatermark) {
+        try {
+          finalWatermarkConf = JSON.parse(savedLocalWatermark);
+        } catch (e) {
+          console.error('Error parsing local watermark settings', e);
+        }
+      }
+      setWatermarkSettings(finalWatermarkConf);
+
+      if (finalWatermarkConf && finalWatermarkConf.logoUrl) {
+        const fileId = getGoogleDriveFileId(finalWatermarkConf.logoUrl);
+        if (fileId) {
+          try {
+            const logoB64 = await gasApi.getMediaAsBase64(fileId);
+            setWatermarkLogoBase64(logoB64);
+          } catch (e) {
+            console.error('Failed to load watermark logo base64', e);
+          }
+        } else {
+          setWatermarkLogoBase64(finalWatermarkConf.logoUrl);
+        }
+      }
 
       // Fetch base64 images for stickers to load them instantly on demand
       stickers.forEach(async (id) => {
@@ -209,6 +263,7 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
         setAudioGrade(savedData.audioGrade || '');
 
         setAdditionalImage(savedData.additionalImage || null);
+        setAdditionalImages(savedData.additionalImage ? [savedData.additionalImage] : []);
         setAdditionalVideo(savedData.video || null);
         setAdditionalAudio(savedData.audio || null);
 
@@ -320,16 +375,30 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       setVideoStream(stream);
-      if (videoPreviewRef.current) {
-        videoPreviewRef.current.srcObject = stream;
+
+      let options: any = {};
+      if (MediaRecorder.isTypeSupported('video/mp4')) {
+        options = { mimeType: 'video/mp4' };
+      } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) {
+        options = { mimeType: 'video/webm;codecs=vp9' };
+      } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8')) {
+        options = { mimeType: 'video/webm;codecs=vp8' };
+      } else if (MediaRecorder.isTypeSupported('video/webm')) {
+        options = { mimeType: 'video/webm' };
       }
 
-      const recorder = new MediaRecorder(stream);
+      const recorder = new MediaRecorder(stream, options);
       const chunks: Blob[] = [];
 
-      recorder.ondataavailable = (e) => chunks.push(e.data);
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) {
+          chunks.push(e.data);
+        }
+      };
+
       recorder.onstop = () => {
-        const blob = new Blob(chunks, { type: 'video/mp4' });
+        const mimeType = recorder.mimeType || 'video/webm';
+        const blob = new Blob(chunks, { type: mimeType });
         const reader = new FileReader();
         reader.onload = (e: any) => {
           setAdditionalVideo(e.target.result);
@@ -375,6 +444,302 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
     }
   };
 
+  const applyWatermarkToImage = (imageBase64: string): Promise<string> => {
+    return new Promise((resolve) => {
+      if (!watermarkSettings) {
+        resolve(imageBase64);
+        return;
+      }
+
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth || 1200;
+        canvas.height = img.naturalHeight || 800;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(imageBase64);
+          return;
+        }
+
+        // Draw original image
+        ctx.drawImage(img, 0, 0);
+
+        // Helper parsers to make watermark configuration flexible & percentage-based
+        const parseOpacity = (val: string | number | undefined): number => {
+          if (val === undefined || val === null || val === '') return 1.0;
+          const s = String(val).trim();
+          if (s.endsWith('%')) {
+            const p = parseFloat(s.replace('%', ''));
+            return isNaN(p) ? 1.0 : p / 100;
+          }
+          const num = parseFloat(s);
+          if (isNaN(num)) return 1.0;
+          if (num > 1.0) return num / 100; // e.g. "50" -> 0.5
+          return num;
+        };
+
+        const parseSizeFactor = (val: string | number | undefined): number => {
+          if (val === undefined || val === null || val === '') return 0.15; // default to 15% of canvas width
+          const s = String(val).trim();
+          if (s.endsWith('%')) {
+            const p = parseFloat(s.replace('%', ''));
+            return isNaN(p) ? 0.15 : p / 100;
+          }
+          const num = parseFloat(s);
+          if (isNaN(num)) return 0.15;
+          if (num > 1.0) return num / 100; // e.g. "15" -> 0.15
+          return num;
+        };
+
+        const parseFontSize = (val: string | number | undefined, canvasWidth: number): number => {
+          if (val === undefined || val === null || val === '') return canvasWidth * 0.02; // default to 2% of canvas width
+          const s = String(val).trim();
+          if (s.endsWith('%')) {
+            const pct = parseFloat(s.replace('%', ''));
+            return isNaN(pct) ? canvasWidth * 0.02 : canvasWidth * (pct / 100);
+          }
+          const num = parseFloat(s);
+          if (isNaN(num)) return canvasWidth * 0.02;
+          if (num < 1.0) {
+            return canvasWidth * num;
+          } else if (num <= 10) {
+            return canvasWidth * (num / 100); // e.g. 2.5 means 2.5% of canvas width
+          } else {
+            const scaleFactor = canvasWidth / 1200;
+            return num * scaleFactor;
+          }
+        };
+
+        const drawLogoAndText = () => {
+          // If logo is set
+          if (watermarkLogoBase64) {
+            const logoImg = new Image();
+            logoImg.onload = () => {
+              const logoWidthRatio = parseSizeFactor(watermarkSettings.sizeFactor);
+              const logoWidth = canvas.width * logoWidthRatio;
+              const logoAspect = logoImg.naturalHeight / logoImg.naturalWidth;
+              const logoHeight = logoWidth * logoAspect;
+              const logoPadding = Math.min(canvas.width, canvas.height) * 0.04;
+
+              let logoX = logoPadding;
+              let logoY = logoPadding;
+
+              if (watermarkSettings.logoPosition === 'top-left') {
+                logoX = logoPadding;
+                logoY = logoPadding;
+              } else if (watermarkSettings.logoPosition === 'top-right') {
+                logoX = canvas.width - logoWidth - logoPadding;
+                logoY = logoPadding;
+              } else if (watermarkSettings.logoPosition === 'bottom-left') {
+                logoX = logoPadding;
+                logoY = canvas.height - logoHeight - logoPadding;
+              } else if (watermarkSettings.logoPosition === 'bottom-right') {
+                logoX = canvas.width - logoWidth - logoPadding;
+                logoY = canvas.height - logoHeight - logoPadding;
+              } else if (watermarkSettings.logoPosition === 'center') {
+                logoX = (canvas.width - logoWidth) / 2;
+                logoY = (canvas.height - logoHeight) / 2;
+              }
+
+              ctx.save();
+              ctx.globalAlpha = parseOpacity(watermarkSettings.opacity);
+              ctx.drawImage(logoImg, logoX, logoY, logoWidth, logoHeight);
+              ctx.restore();
+
+              // Draw text after logo is drawn
+              drawTextOnly();
+            };
+            logoImg.onerror = () => {
+              drawTextOnly();
+            };
+            logoImg.src = watermarkLogoBase64;
+          } else {
+            drawTextOnly();
+          }
+        };
+
+        const drawTextOnly = () => {
+          if (watermarkSettings.textPrefix) {
+            const computedFontSize = Math.max(14, parseFontSize(watermarkSettings.fontSize, canvas.width));
+            const textPadding = Math.min(canvas.width, canvas.height) * 0.04;
+
+            ctx.save();
+            ctx.direction = 'rtl';
+            ctx.font = `bold ${computedFontSize}px Amiri, Cairo, system-ui, sans-serif`;
+            ctx.shadowColor = 'rgba(0,0,0,0.85)';
+            ctx.shadowBlur = 6;
+            ctx.fillStyle = '#FFFFFF';
+
+            const textToDraw = watermarkSettings.textPrefix;
+            const textHeight = computedFontSize;
+
+            let textX = textPadding;
+            let textY = canvas.height - textPadding;
+
+            if (watermarkSettings.textPosition === 'top-left') {
+              textX = textPadding;
+              textY = textPadding + textHeight;
+            } else if (watermarkSettings.textPosition === 'top-right') {
+              textX = canvas.width - textPadding;
+              textY = textPadding + textHeight;
+            } else if (watermarkSettings.textPosition === 'bottom-left') {
+              textX = textPadding;
+              textY = canvas.height - textPadding;
+            } else if (watermarkSettings.textPosition === 'bottom-right') {
+              textX = canvas.width - textPadding;
+              textY = canvas.height - textPadding;
+            } else if (watermarkSettings.textPosition === 'center') {
+              textX = canvas.width / 2;
+              textY = canvas.height / 2 + textHeight / 2;
+            }
+
+            if (watermarkSettings.textPosition.includes('right')) {
+              ctx.textAlign = 'right';
+            } else if (watermarkSettings.textPosition.includes('left')) {
+              ctx.textAlign = 'left';
+            } else {
+              ctx.textAlign = 'center';
+            }
+
+            ctx.fillText(textToDraw, textX, textY);
+            ctx.restore();
+          }
+          resolve(canvas.toDataURL('image/jpeg', 0.9));
+        };
+
+        drawLogoAndText();
+      };
+
+      img.onerror = () => {
+        resolve(imageBase64);
+      };
+
+      img.src = imageBase64;
+    });
+  };
+
+  const stitchImages = (images: string[]): Promise<string> => {
+    return new Promise((resolve) => {
+      if (images.length === 0) {
+        resolve('');
+        return;
+      }
+      if (images.length === 1) {
+        resolve(images[0]);
+        return;
+      }
+
+      const loadedImages: HTMLImageElement[] = [];
+      let loadedCount = 0;
+
+      const onImageLoaded = () => {
+        loadedCount++;
+        if (loadedCount === images.length) {
+          const canvas = document.createElement('canvas');
+          let maxWidth = 0;
+          const spacing = 15;
+
+          loadedImages.forEach((img) => {
+            if (img.naturalWidth > maxWidth) {
+              maxWidth = img.naturalWidth;
+            }
+          });
+
+          if (maxWidth === 0) maxWidth = 800;
+
+          const scaledHeights = loadedImages.map((img) => {
+            const w = img.naturalWidth || maxWidth;
+            const h = img.naturalHeight || 600;
+            const scale = maxWidth / w;
+            return h * scale;
+          });
+
+          const totalHeight = scaledHeights.reduce((sum, h) => sum + h, 0) + (spacing * (images.length - 1));
+
+          canvas.width = maxWidth;
+          canvas.height = totalHeight;
+
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(images[0]);
+            return;
+          }
+
+          ctx.fillStyle = '#0f172a';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+          let currentY = 0;
+          loadedImages.forEach((img, idx) => {
+            const w = img.naturalWidth || maxWidth;
+            const h = img.naturalHeight || 600;
+            const scale = maxWidth / w;
+            const targetHeight = h * scale;
+
+            ctx.drawImage(img, 0, currentY, maxWidth, targetHeight);
+            currentY += targetHeight + spacing;
+          });
+
+          resolve(canvas.toDataURL('image/jpeg', 0.9));
+        }
+      };
+
+      images.forEach((src, idx) => {
+        const img = new Image();
+        img.onload = () => {
+          loadedImages[idx] = img;
+          onImageLoaded();
+        };
+        img.onerror = () => {
+          const mockImg = new Image();
+          loadedImages[idx] = mockImg;
+          onImageLoaded();
+        };
+        img.src = src;
+      });
+    });
+  };
+
+  const handleUpdateWatermarkSetting = async (key: keyof WatermarkSettings, value: any) => {
+    if (!watermarkSettings) return;
+    const updated = { ...watermarkSettings, [key]: value };
+    setWatermarkSettings(updated);
+    localStorage.setItem('localWatermarkSettings', JSON.stringify(updated));
+
+    if (key === 'logoUrl') {
+      const fileId = getGoogleDriveFileId(value);
+      if (fileId) {
+        try {
+          const logoB64 = await gasApi.getMediaAsBase64(fileId);
+          setWatermarkLogoBase64(logoB64);
+        } catch (e) {
+          console.error('Failed to load updated logo from Google Drive', e);
+        }
+      } else {
+        setWatermarkLogoBase64(value);
+      }
+    }
+  };
+
+  const handleResetWatermarkSettings = async () => {
+    localStorage.removeItem('localWatermarkSettings');
+    try {
+      const watermarkConf = await gasApi.getWatermarkSettings();
+      setWatermarkSettings(watermarkConf);
+      if (watermarkConf && watermarkConf.logoUrl) {
+        const fileId = getGoogleDriveFileId(watermarkConf.logoUrl);
+        if (fileId) {
+          const logoB64 = await gasApi.getMediaAsBase64(fileId);
+          setWatermarkLogoBase64(logoB64);
+        } else {
+          setWatermarkLogoBase64(watermarkConf.logoUrl);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to reset watermark settings', e);
+    }
+  };
+
   // Saving All Media to database (Google Sheet + Drive Folder)
   const handleSaveCorrection = async () => {
     setSaving(true);
@@ -386,18 +751,28 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
         canvasBase64 = editorRef.current.exportCanvas();
       }
 
+      setSaveStep('جاري تجهيز ودمج المرفقات الإضافية...');
+      let finalAdditionalImageBase64: string | null = null;
+      if (additionalImages.length > 0) {
+        finalAdditionalImageBase64 = await stitchImages(additionalImages);
+      }
+
       setSaveStep('جاري رفع وتحديث بيانات الطالب والملفات على جوجل درايف وشيتس...');
 
       const cleanName = submission.studentName.replace(/[^a-zA-Z0-9\u0600-\u06FF]/g, '_');
-      const canvasFilename = `صورة-معدلة-${cleanName}-${submission.studentId}-درس-${submission.lessonNumber}-إرسال-${submission.imageSubmissionCount || 1}.jpg`;
-      const imageFilename = `صورة-إضافية-${cleanName}-${submission.studentId}-درس-${submission.lessonNumber}-إرسال-${submission.imageSubmissionCount || 1}.jpg`;
-      const videoFilename = `فيديو-${cleanName}-${submission.studentId}-درس-${submission.lessonNumber}-إرسال-${submission.imageSubmissionCount || 1}.mp4`;
-      const audioFilename = `صوت-${cleanName}-${submission.studentId}-درس-${submission.lessonNumber}-إرسال-${submission.audioSubmissionCount || 1}.mp3`;
+      const now = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+
+      const canvasFilename = `صورة-تصحيح-${cleanName}-${submission.studentId}-درس-${submission.lessonNumber}-إرسال-${submission.imageSubmissionCount || 1}_${timestamp}.jpg`;
+      const imageFilename = `صورة-إضافية-${cleanName}-${submission.studentId}-درس-${submission.lessonNumber}-إرسال-${submission.imageSubmissionCount || 1}_${timestamp}.jpg`;
+      const videoFilename = `فيديو-${cleanName}-${submission.studentId}-درس-${submission.lessonNumber}-إرسال-${submission.imageSubmissionCount || 1}_${timestamp}.mp4`;
+      const audioFilename = `ملاحظات-${cleanName}-${submission.studentId}-درس-${submission.lessonNumber}-إرسال-${submission.audioSubmissionCount || 1}_${timestamp}.mp3`;
 
       await gasApi.saveAllMedia({
         canvasBase64,
         canvasFilename,
-        imageBase64: additionalImage,
+        imageBase64: finalAdditionalImageBase64,
         imageFilename,
         videoBase64: additionalVideo,
         videoFilename,
@@ -425,8 +800,10 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (event: any) => {
-      setAdditionalImage(event.target.result);
+    reader.onload = async (event: any) => {
+      const base64Src = event.target.result;
+      const watermarked = await applyWatermarkToImage(base64Src);
+      setAdditionalImages((prev) => [...prev, watermarked]);
     };
     reader.readAsDataURL(file);
   };
@@ -472,7 +849,7 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
     setIsPhotoCameraOpen(false);
   };
 
-  const capturePhoto = () => {
+  const capturePhoto = async () => {
     if (photoCameraStream && photoCameraRef.current) {
       const video = photoCameraRef.current;
       const canvas = document.createElement('canvas');
@@ -482,7 +859,8 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
       if (ctx) {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         const b64 = canvas.toDataURL('image/jpeg', 0.85);
-        setAdditionalImage(b64);
+        const watermarked = await applyWatermarkToImage(b64);
+        setAdditionalImages((prev) => [...prev, watermarked]);
         stopPhotoCamera();
       }
     }
@@ -630,7 +1008,7 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                 toolGroup === 'draw' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <PenTool className="h-3.5 w-3.5 inline-block ml-1.5" /> الرسم والكتابة
+              <PenTool className="h-3.5 w-3.5 inline-block ml-1.5" /> رسم
             </button>
             <button
               onClick={() => {
@@ -642,7 +1020,7 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                 toolGroup === 'textSticker' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <Award className="h-3.5 w-3.5 inline-block ml-1.5" /> الأختام والملاحظات
+              <Award className="h-3.5 w-3.5 inline-block ml-1.5" /> نص
             </button>
             <button
               onClick={() => {
@@ -653,7 +1031,7 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                 toolGroup === 'other' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <Grid className="h-3.5 w-3.5 inline-block ml-1.5" /> أدوات التدوير والمحو
+              <Grid className="h-3.5 w-3.5 inline-block ml-1.5" /> أدوات
             </button>
           </div>
         )}
@@ -664,32 +1042,15 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
             onClick={() => setShowStudentDetails(!showStudentDetails)}
             className="py-2.5 px-4 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold flex items-center gap-2"
           >
-            <FileText className="h-4 w-4" /> بيانات الطالب التفصيلية
+            <FileText className="h-4 w-4" /> بيانات
           </button>
           {!submission.imageFileId && (
             <>
-              <button
-                id="btn-toggle-audio-info-header"
-                onClick={() => {
-                  setShowAudioInfo(!showAudioInfo);
-                  if (!showAudioInfo) {
-                    setShowAudioForms(false);
-                    setShowAudioFeedbackPanel(false);
-                  }
-                }}
-                className={`py-2.5 px-4 rounded-xl text-xs font-bold flex items-center gap-2 transition-all ${
-                  showAudioInfo ? 'bg-emerald-600 text-white shadow-md' : 'bg-slate-850 hover:bg-slate-800 text-slate-300'
-                }`}
-              >
-                <FileText className="h-4 w-4" />
-                <span>معلومات</span>
-              </button>
               <button
                 id="btn-toggle-audio-forms-header"
                 onClick={() => {
                   setShowAudioForms(!showAudioForms);
                   if (!showAudioForms) {
-                    setShowAudioInfo(false);
                     setShowAudioFeedbackPanel(false);
                   }
                 }}
@@ -702,12 +1063,7 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
               </button>
             </>
           )}
-          <button
-            onClick={handleSaveCorrection}
-            className="py-2.5 px-5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-xs shadow-md shadow-emerald-900/20"
-          >
-            حفظ التصحيح النهائي
-          </button>
+
         </div>
       </header>
 
@@ -774,44 +1130,9 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
       <div className="flex-grow flex flex-col lg:flex-row overflow-hidden relative">
         {!submission.imageFileId ? (
           /* Show custom Audio Workspace for audio-only lessons */
-          <div className="flex-grow overflow-y-auto p-4 sm:p-6 lg:p-8 bg-slate-950">
+          <div className="flex-grow overflow-y-auto p-4 sm:p-6 lg:p-8 bg-slate-950 relative">
             <div className="max-w-3xl mx-auto space-y-6 pb-20">
               
-              {/* A. Additional Google Sheet Columns Info (Placed above the player) */}
-              <AnimatePresence>
-                {showAudioInfo && additionalHeaders.length > 0 && (
-                  <motion.div
-                    initial={{ opacity: 0, y: -15 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -15 }}
-                    className="bg-slate-900 border border-slate-800 p-5 rounded-2xl shadow-xl space-y-3"
-                  >
-                    <h4 className="font-bold text-slate-300 border-b border-slate-800 pb-1.5 text-xs flex items-center gap-1">
-                      <FileText className="h-3.5 w-3.5 text-slate-400" /> معلومات إضافية من الشيت
-                    </h4>
-                    <div className="space-y-2 bg-slate-950/60 p-3 rounded-xl border border-slate-800/30 text-xs">
-                      {[
-                        submission.additionalT,
-                        submission.additionalU,
-                        submission.additionalV,
-                        submission.additionalW,
-                        submission.additionalX,
-                        submission.additionalY
-                      ].map((val, idx) => {
-                        const header = additionalHeaders[idx] || `حقل إضافي ${idx + 1}`;
-                        if (!val) return null;
-                        return (
-                          <div key={'add-col-audio-tab-' + idx} className="grid grid-cols-2 py-1.5 border-b border-slate-800/30 last:border-0">
-                            <span className="text-slate-500">{header}:</span>
-                            <span className="text-slate-200 text-left font-semibold">{val}</span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-
               {/* B. Grades & Comments (رصد تقييم ودرجات التلاوة) (Placed above the player) */}
               <AnimatePresence>
                 {showAudioForms && (
@@ -899,15 +1220,28 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                 )}
               </AnimatePresence>
 
-              {/* C. Response Channels / Uploads feedback panel (Placed above the player) */}
+              {/* C. Response Channels / Uploads feedback panel (Floating/Absolute) */}
               <AnimatePresence>
                 {showAudioFeedbackPanel && (
                   <motion.div
-                    initial={{ opacity: 0, y: -15 }}
+                    initial={{ opacity: 0, y: 50 }}
                     animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -15 }}
-                    className="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-hidden"
+                    exit={{ opacity: 0, y: 50 }}
+                    className="absolute bottom-24 left-4 right-4 z-40 max-h-[60vh] overflow-y-auto bg-slate-900/95 backdrop-blur-md border border-slate-800 rounded-2xl shadow-2xl max-w-3xl mx-auto w-[calc(100%-2rem)] overflow-hidden"
                   >
+                    <div className="bg-slate-900 px-4 py-3 border-b border-slate-800/60 flex justify-between items-center bg-slate-950">
+                      <h4 className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                        <UploadCloud className="h-4 w-4 text-sky-400" />
+                        <span>إضافة مرفقات وتصحيحات إضافية</span>
+                      </h4>
+                      <button 
+                        onClick={() => setShowAudioFeedbackPanel(false)} 
+                        className="text-slate-500 hover:text-slate-300 transition-colors"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+
                     <div className="bg-slate-950 p-3 flex border-b border-slate-800">
                       <button
                         onClick={() => setActiveFeedbackTab('audio')}
@@ -915,7 +1249,7 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                           activeFeedbackTab === 'audio' ? 'bg-emerald-600/10 border border-emerald-500/20 text-emerald-400' : 'text-slate-400 hover:text-slate-200'
                         }`}
                       >
-                        <Mic className="h-4 w-4" /> رد وتصحيح صوتي
+                        <Mic className="h-4 w-4" /> صوت
                       </button>
                       <button
                         onClick={() => setActiveFeedbackTab('video')}
@@ -923,7 +1257,7 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                           activeFeedbackTab === 'video' ? 'bg-emerald-600/10 border border-emerald-500/20 text-emerald-400' : 'text-slate-400 hover:text-slate-200'
                         }`}
                       >
-                        <FileVideo className="h-4 w-4" /> تسجيل توضيح مرئي
+                        <FileVideo className="h-4 w-4" /> فيديو
                       </button>
                       <button
                         onClick={() => setActiveFeedbackTab('image')}
@@ -931,7 +1265,7 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                           activeFeedbackTab === 'image' ? 'bg-emerald-600/10 border border-emerald-500/20 text-emerald-400' : 'text-slate-400 hover:text-slate-200'
                         }`}
                       >
-                        <Camera className="h-4 w-4" /> التقاط صورة كروكي
+                        <Camera className="h-4 w-4" /> صورة
                       </button>
                     </div>
 
@@ -1037,7 +1371,7 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                             {recordingVideo && (
                               <div className="bg-slate-950 p-2 rounded-2xl border border-slate-850 overflow-hidden aspect-video max-w-sm mx-auto relative">
                                 <video
-                                  ref={videoPreviewRef}
+                                  ref={videoPreviewRefCallback}
                                   autoPlay
                                   playsInline
                                   muted
@@ -1117,7 +1451,7 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                           {isPhotoCameraOpen && (
                             <div className="bg-slate-950 p-2 rounded-2xl border border-slate-850 overflow-hidden max-w-sm mx-auto relative">
                               <video
-                                ref={photoCameraRef}
+                                ref={photoCameraRefCallback}
                                 autoPlay
                                 playsInline
                                 className="w-full rounded-xl object-cover"
@@ -1125,23 +1459,32 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                             </div>
                           )}
 
-                          {additionalImage && (
-                            <div className="bg-slate-950 p-4 rounded-xl border border-slate-850 flex flex-col sm:flex-row items-center justify-between gap-4">
-                              <div className="flex items-center gap-2">
-                                <div className="h-12 w-12 rounded-lg border border-slate-800 overflow-hidden shrink-0">
-                                  <img src={additionalImage} className="h-full w-full object-cover" />
-                                </div>
-                                <div className="text-[11px]">
-                                  <span className="font-bold text-slate-300 block">تم التقاط/رفع الصورة الكروكية</span>
-                                  <span className="text-slate-500 text-[9px]">سيتم رفعه وتحديثه تلقائياً عند الحفظ النهائي</span>
-                                </div>
+                          {additionalImages.length > 0 && (
+                            <div className="space-y-3 w-full">
+                              <span className="text-slate-400 text-xs font-semibold block">الصور المرفقة ({additionalImages.length}):</span>
+                              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                                {additionalImages.map((imgSrc, idx) => (
+                                  <div key={idx} className="bg-slate-950 p-2 rounded-xl border border-slate-850 flex flex-col gap-2 relative group">
+                                    <div className="aspect-square w-full rounded-lg border border-slate-800 overflow-hidden relative">
+                                      <img src={imgSrc} className="h-full w-full object-cover animate-fade-in" />
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setAdditionalImages((prev) => prev.filter((_, i) => i !== idx));
+                                        }}
+                                        className="absolute top-1.5 right-1.5 p-1.5 bg-rose-600 hover:bg-rose-500 rounded-lg text-white transition-all shadow-md active:scale-90"
+                                        title="حذف الصورة"
+                                      >
+                                        <Trash2 className="h-3.5 w-3.5" />
+                                      </button>
+                                    </div>
+                                    <div className="text-[10px] text-slate-400 text-center font-mono font-bold">صورة {idx + 1}</div>
+                                  </div>
+                                ))}
                               </div>
-                              <button
-                                onClick={() => setAdditionalImage(null)}
-                                className="py-2 px-3 bg-slate-900 hover:bg-slate-850 text-rose-500 hover:text-rose-400 rounded-lg text-xs font-bold"
-                              >
-                                حذف الصورة
-                              </button>
+                              <p className="text-[10px] text-slate-500 leading-relaxed bg-slate-950/60 p-2.5 rounded-xl border border-slate-850/60">
+                                سيتم دمج جميع هذه الصور المرفقة تلقائياً عند الحفظ لتخزينها بشكل سليم ومنسق.
+                              </p>
                             </div>
                           )}
                         </div>
@@ -1286,23 +1629,22 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
               </div>
 
               {/* E. Audio Page Action Strip (Two Buttons Row) */}
-              <div className="flex flex-wrap items-center gap-3 bg-slate-900 border border-slate-800 p-3 rounded-2xl shadow-lg">
+              <div className="flex items-center justify-center gap-3 bg-slate-900 border border-slate-800 p-2.5 rounded-2xl shadow-lg max-w-md mx-auto">
                 {/* C. رفع ملف Toggle button */}
                 <button
                   id="btn-audio-toggle-feedback"
                   onClick={() => {
                     setShowAudioFeedbackPanel(!showAudioFeedbackPanel);
                     if (!showAudioFeedbackPanel) {
-                      setShowAudioInfo(false);
                       setShowAudioForms(false);
                     }
                   }}
-                  className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all ${
+                  className={`py-2 px-4 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all w-auto shrink-0 ${
                     showAudioFeedbackPanel ? 'bg-sky-600 text-white shadow-md' : 'bg-slate-950 text-slate-300 hover:bg-slate-850'
                   }`}
                 >
-                  <UploadCloud className="h-4 w-4" />
-                  <span>رفع ملف رد (صوت/فيديو/كروكي)</span>
+                  <Plus className="h-4 w-4 text-sky-400" />
+                  <span>إضافة</span>
                 </button>
 
                 {/* D. حفظ button */}
@@ -1310,7 +1652,7 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                   id="btn-audio-save-direct"
                   onClick={handleSaveCorrection}
                   disabled={saving}
-                  className="flex-grow sm:flex-1 py-2.5 px-5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-md active:scale-95 transition-transform disabled:opacity-50"
+                  className="py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-md active:scale-95 transition-transform disabled:opacity-50 w-auto shrink-0"
                 >
                   <Check className="h-4 w-4" />
                   <span>حفظ التقييم</span>
@@ -1322,9 +1664,9 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
         ) : (
           /* Show current Canvas Editor design for image lessons */
           <>
-            {/* Toolbox Options Panel (Floating Card on Top of Whiteboard) */}
-            <div className={`fixed lg:absolute top-20 lg:top-4 left-4 lg:left-8 z-40 w-[calc(100%-2rem)] sm:w-80 max-h-[calc(100%-8rem)] lg:max-h-[calc(100%-4rem)] bg-slate-900/95 backdrop-blur-md border border-slate-800 flex flex-col overflow-y-auto p-5 space-y-6 rounded-2xl shadow-2xl transition-all duration-300 ${
-              showMobileSidebar ? 'translate-x-0 opacity-100 scale-100 pointer-events-auto' : '-translate-x-10 opacity-0 scale-95 pointer-events-none'
+            {/* Toolbox Options Panel (Floating Vertical Sidebar on Right) */}
+            <div className={`fixed lg:absolute top-24 lg:top-4 bottom-auto lg:bottom-auto right-4 left-auto z-40 w-72 sm:w-85 max-h-[calc(100vh-12rem)] lg:max-h-[calc(100%-2rem)] h-auto bg-slate-900/95 backdrop-blur-md border border-slate-800 flex flex-col overflow-y-auto p-5 space-y-5 rounded-2xl shadow-2xl transition-all duration-300 ${
+              showMobileSidebar ? 'translate-x-0 opacity-100 scale-100 pointer-events-auto' : 'translate-x-12 opacity-0 scale-95 pointer-events-none'
             }`}>
               {/* Close Button */}
               <div className="flex justify-between items-center pb-2 border-b border-slate-800">
@@ -1519,19 +1861,22 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                       </div>
 
                       <div className="space-y-1.5">
-                        <label className="text-[10px] text-slate-500 block">اختر عبارة جاهزة (Settings)</label>
-                        <div className="space-y-2 max-h-[14rem] overflow-y-auto bg-slate-950/60 p-2.5 rounded-xl border border-slate-800/40">
+                        <label className="text-[10px] text-slate-500 block">اختر عبارة جاهزة</label>
+                        <select
+                          onChange={(e) => {
+                            if (e.target.value) {
+                              selectPredefinedText(e.target.value);
+                            }
+                          }}
+                          className="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-xs font-semibold text-slate-300 focus:border-emerald-500 focus:outline-none"
+                        >
+                          <option value="">-- اختر عبارة نموذجية جاهزة --</option>
                           {predefinedTexts.map((item, idx) => (
-                            <button
-                              key={'pref-txt-' + idx}
-                              onClick={() => selectPredefinedText(item.phrase)}
-                              className="w-full text-right p-2 bg-slate-900 hover:bg-slate-850 hover:text-white rounded-lg border border-slate-800/50 text-xs transition-colors"
-                            >
-                              <span className="font-bold text-slate-300 block mb-0.5">{item.title}</span>
-                              <span className="text-slate-500 text-[10px] block line-clamp-1">{item.phrase}</span>
-                            </button>
+                            <option key={'pref-txt-' + idx} value={item.phrase}>
+                              {item.title}: {item.phrase}
+                            </option>
                           ))}
-                        </div>
+                        </select>
                       </div>
                     </div>
                   )}
@@ -1567,23 +1912,145 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                       <RotateCw className="h-4 w-4 text-sky-400 animate-spin-slow" /> تدوير الصورة 90 درجة
                     </button>
                   </div>
+
+                  {/* Watermark Settings Configuration Section */}
+                  <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
+                        <Sparkles className="h-3.5 w-3.5 text-emerald-400" />
+                        إعدادات العلامة المائية
+                      </span>
+                      {localStorage.getItem('localWatermarkSettings') && (
+                        <button
+                          onClick={handleResetWatermarkSettings}
+                          className="text-[10px] text-rose-400 hover:text-rose-300 transition-colors"
+                        >
+                          إعادة ضبط
+                        </button>
+                      )}
+                    </div>
+                    
+                    {watermarkSettings ? (
+                      <div className="space-y-3.5 pt-1.5 border-t border-slate-900 text-xs">
+                        {/* 1. Watermark Text */}
+                        <div className="space-y-1">
+                          <label className="text-[10px] text-slate-500 block">نص العلامة المائية</label>
+                          <input
+                            type="text"
+                            value={watermarkSettings.textPrefix || ''}
+                            onChange={(e) => handleUpdateWatermarkSetting('textPrefix', e.target.value)}
+                            className="w-full p-2 bg-slate-900 border border-slate-800 rounded-lg text-xs font-semibold focus:outline-none focus:border-emerald-500 text-slate-200"
+                            placeholder="مثال: حقوق الطبع محفوظة"
+                          />
+                        </div>
+
+                        {/* 2. Text position */}
+                        <div className="space-y-1">
+                          <label className="text-[10px] text-slate-500 block">موقع النص</label>
+                          <select
+                            value={watermarkSettings.textPosition || 'bottom-right'}
+                            onChange={(e) => handleUpdateWatermarkSetting('textPosition', e.target.value)}
+                            className="w-full p-2 bg-slate-900 border border-slate-800 rounded-lg text-xs font-semibold text-slate-200"
+                          >
+                            <option value="top-right">أعلى اليمين</option>
+                            <option value="top-left">أعلى اليسار</option>
+                            <option value="bottom-right">أسفل اليمين</option>
+                            <option value="bottom-left">أسفل اليسار</option>
+                            <option value="center">المنتصف</option>
+                          </select>
+                        </div>
+
+                        {/* 3. Text font size */}
+                        <div className="space-y-1">
+                          <div className="flex justify-between text-[10px] text-slate-500">
+                            <span>حجم خط النص</span>
+                            <span className="text-emerald-400 font-mono">{watermarkSettings.fontSize || 20}</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="10"
+                            max="80"
+                            value={watermarkSettings.fontSize || 20}
+                            onChange={(e) => handleUpdateWatermarkSetting('fontSize', Number(e.target.value))}
+                            className="w-full accent-emerald-500 bg-slate-800 h-1 rounded"
+                          />
+                        </div>
+
+                        {/* 4. Logo URL */}
+                        <div className="space-y-1">
+                          <label className="text-[10px] text-slate-500 block">رابط شعار العلامة المائية (Drive)</label>
+                          <input
+                            type="text"
+                            value={watermarkSettings.logoUrl || ''}
+                            onChange={(e) => handleUpdateWatermarkSetting('logoUrl', e.target.value)}
+                            className="w-full p-2 bg-slate-900 border border-slate-800 rounded-lg text-xs font-mono focus:outline-none focus:border-emerald-500 text-slate-200"
+                            placeholder="رابط ملف الشعار"
+                          />
+                        </div>
+
+                        {/* 5. Logo position */}
+                        <div className="space-y-1">
+                          <label className="text-[10px] text-slate-500 block">موقع الشعار</label>
+                          <select
+                            value={watermarkSettings.logoPosition || 'top-right'}
+                            onChange={(e) => handleUpdateWatermarkSetting('logoPosition', e.target.value)}
+                            className="w-full p-2 bg-slate-900 border border-slate-800 rounded-lg text-xs font-semibold text-slate-200"
+                          >
+                            <option value="top-right">أعلى اليمين</option>
+                            <option value="top-left">أعلى اليسار</option>
+                            <option value="bottom-right">أسفل اليمين</option>
+                            <option value="bottom-left">أسفل اليسار</option>
+                            <option value="center">المنتصف</option>
+                          </select>
+                        </div>
+
+                        {/* 6. Logo size factor */}
+                        <div className="space-y-1">
+                          <div className="flex justify-between text-[10px] text-slate-500">
+                            <span>حجم الشعار بالنسبة للصورة</span>
+                            <span className="text-emerald-400 font-mono">
+                              {Math.round((Number(watermarkSettings.sizeFactor) || 0.15) * 100)}%
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min="5"
+                            max="50"
+                            value={Math.round((Number(watermarkSettings.sizeFactor) || 0.15) * 100)}
+                            onChange={(e) => handleUpdateWatermarkSetting('sizeFactor', Number(e.target.value) / 100)}
+                            className="w-full accent-emerald-500 bg-slate-800 h-1 rounded"
+                          />
+                        </div>
+
+                        {/* 7. Opacity */}
+                        <div className="space-y-1">
+                          <div className="flex justify-between text-[10px] text-slate-500">
+                            <span>شفافية العلامة المائية</span>
+                            <span className="text-emerald-400 font-mono">
+                              {Math.round((Number(watermarkSettings.opacity) || 1.0) * 100)}%
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min="10"
+                            max="100"
+                            value={Math.round((Number(watermarkSettings.opacity) || 1.0) * 100)}
+                            onChange={(e) => handleUpdateWatermarkSetting('opacity', Number(e.target.value) / 100)}
+                            className="w-full accent-emerald-500 bg-slate-800 h-1 rounded"
+                          />
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-[10px] text-slate-500">جاري تحميل إعدادات العلامة المائية...</p>
+                    )}
+                  </div>
                 </div>
               )}
-
-              {/* Quick link to original file helper */}
-              <div className="pt-4 border-t border-slate-800">
-                <button
-                  onClick={handleOpenOriginalMedia}
-                  className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-slate-950 hover:bg-slate-900 border border-slate-800 rounded-xl text-xs font-bold transition-all text-slate-300"
-                >
-                  <Play className="h-3.5 w-3.5" /> فتح واستعراض الملف الوارد الأصلي
-                </button>
-              </div>
             </div>
 
             {/* Central editor canvas */}
-            <div className="flex-grow flex flex-col p-4 overflow-y-auto relative min-h-0">
-              <div className="h-[520px] sm:h-[650px] lg:h-[72vh] flex flex-col shrink-0 min-h-[520px] sm:min-h-[650px] lg:min-h-[600px] relative w-full rounded-3xl overflow-hidden border border-slate-800 shadow-inner bg-slate-950">
+            <div className="flex-grow flex flex-col p-4 overflow-hidden relative min-h-0">
+              <div className="flex-grow h-0 flex flex-col relative w-full rounded-3xl overflow-hidden border border-slate-800 shadow-inner bg-slate-950">
                 <CanvasEditor
                   imageBase64={studentImageBase64}
                   mode={mode}
@@ -1600,22 +2067,15 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                   editorRef={editorRef}
                   scale={scale}
                   setScale={setScale}
+                  watermarkSettings={watermarkSettings}
+                  watermarkLogoBase64={watermarkLogoBase64}
+                  applyWatermark={!submission.isSaved}
                 />
               </div>
 
-              {/* Custom 4-Button Action Strip under Whiteboard */}
-              <div className="flex flex-wrap items-center gap-3 bg-slate-900 border border-slate-800 p-3 mt-4 rounded-2xl shadow-lg z-10">
-                {/* Mobile Tools Toggle */}
-                <button
-                  id="btn-toggle-tools-mobile"
-                  onClick={() => setShowMobileSidebar(!showMobileSidebar)}
-                  className={`lg:hidden py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
-                    showMobileSidebar ? 'bg-emerald-600 text-white' : 'bg-slate-950 text-slate-400 hover:bg-slate-850'
-                  }`}
-                >
-                  <PenTool className="h-4 w-4" />
-                  <span>الأدوات</span>
-                </button>
+              {/* Custom Action Strip under Whiteboard */}
+              <div className="flex flex-wrap items-center gap-3 bg-slate-900 border border-slate-800 p-3 mt-4 rounded-2xl shadow-lg z-10 justify-center">
+
 
                 {/* 1. Evaluation Toggle Button (تقييم) */}
                 <button
@@ -1624,7 +2084,7 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                     setShowForms(!showForms);
                     if (!showForms) setShowUploads(false); // only one panel at a time
                   }}
-                  className={`flex-1 py-2 px-3 sm:px-4 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+                  className={`py-2 px-3 sm:px-4 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all w-auto shrink-0 ${
                     showForms ? 'bg-emerald-600 text-white shadow-md' : 'bg-slate-950 text-slate-300 hover:bg-slate-850'
                   }`}
                 >
@@ -1639,16 +2099,26 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                     setShowUploads(!showUploads);
                     if (!showUploads) setShowForms(false); // only one panel at a time
                   }}
-                  className={`flex-1 py-2 px-3 sm:px-4 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+                  className={`py-2 px-3 sm:px-4 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all w-auto shrink-0 ${
                     showUploads ? 'bg-sky-600 text-white shadow-md' : 'bg-slate-950 text-slate-300 hover:bg-slate-850'
                   }`}
                 >
-                  <UploadCloud className="h-4 w-4 text-sky-400" />
+                  <Plus className="h-4 w-4 text-sky-400" />
                   <span>إضافة</span>
                 </button>
 
-                {/* 3. Zoom / Scaling Controls */}
-                <div className="flex items-center gap-2 bg-slate-950 py-1.5 px-3 rounded-xl border border-slate-800">
+                {/* 3. Open Original File Button (الأصل) */}
+                <button
+                  id="btn-open-original-v2"
+                  onClick={handleOpenOriginalMedia}
+                  className="py-2 px-3 sm:px-4 bg-slate-950 hover:bg-slate-850 text-slate-300 border border-slate-800 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all w-auto shrink-0"
+                >
+                  <Play className="h-4 w-4 text-amber-400" />
+                  <span>الأصل</span>
+                </button>
+
+                {/* 4. Zoom / Scaling Controls */}
+                <div className="flex items-center gap-2 bg-slate-950 py-1.5 px-3 rounded-xl border border-slate-800 shrink-0">
                   <button
                     id="btn-scale-decrease"
                     onClick={() => setScale(Math.max(0.4, scale - 0.2))}
@@ -1679,12 +2149,12 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                   </button>
                 </div>
 
-                {/* 4. Save Button (حفظ) */}
+                {/* 5. Save Button (حفظ) */}
                 <button
                   id="btn-save-image-v2"
                   onClick={handleSaveCorrection}
                   disabled={saving}
-                  className="flex-1 py-2 px-3 sm:px-4 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-md active:scale-95 transition-transform disabled:opacity-50"
+                  className="py-2 px-3 sm:px-4 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-md active:scale-95 transition-transform disabled:opacity-50 w-auto shrink-0"
                 >
                   <Check className="h-4 w-4" />
                   <span>حفظ</span>
@@ -1698,7 +2168,7 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                     initial={{ opacity: 0, y: 50 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: 50 }}
-                    className="bg-slate-900/95 backdrop-blur border border-slate-800 p-5 rounded-2xl shadow-2xl mt-4 max-w-4xl mx-auto w-full z-15"
+                    className="absolute bottom-24 left-4 right-4 z-40 max-h-[60vh] overflow-y-auto bg-slate-900/95 backdrop-blur-md border border-slate-800 p-5 rounded-2xl shadow-2xl max-w-4xl mx-auto w-[calc(100%-2rem)]"
                   >
                     <div className="flex justify-between items-center pb-2 border-b border-slate-800/60 mb-4">
                       <h4 className="text-xs font-bold text-slate-300">نموذج تقييم ورصد درجات وملاحظات الواجب</h4>
@@ -1761,155 +2231,276 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                     initial={{ opacity: 0, y: 50 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: 50 }}
-                    className="bg-slate-900/95 backdrop-blur border border-slate-800 p-5 rounded-2xl shadow-2xl mt-4 max-w-4xl mx-auto w-full z-15 overflow-y-auto max-h-[14rem]"
+                    className="absolute bottom-24 left-4 right-4 z-40 max-h-[60vh] overflow-y-auto bg-slate-900/95 backdrop-blur-md border border-slate-800 rounded-2xl shadow-2xl max-w-4xl mx-auto w-[calc(100%-2rem)] overflow-hidden"
                   >
-                    <div className="flex justify-between items-center pb-2 border-b border-slate-800/60 mb-4">
-                      <h4 className="text-xs font-bold text-slate-300">أدوات إضافية: تسجيل مقاطع ورفع ملفات مرفقة للتصحيح</h4>
-                      <button onClick={() => setShowUploads(false)} className="text-slate-500 hover:text-slate-300">
+                    <div className="flex justify-between items-center p-4 border-b border-slate-800/60 bg-slate-900">
+                      <h4 className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                        <UploadCloud className="h-4 w-4 text-sky-400" /> أدوات إضافية: تسجيل مقاطع ورفع ملفات مرفقة للتصحيح
+                      </h4>
+                      <button onClick={() => setShowUploads(false)} className="text-slate-500 hover:text-slate-300 transition-colors">
                         <X className="h-4 w-4" />
                       </button>
                     </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                      {/* Additional Image Upload */}
-                      <div className="space-y-2 bg-slate-950 p-4 rounded-xl border border-slate-800/40">
-                        <span className="text-[11px] font-bold text-slate-400 block">صورة إضافية للحل الصحيح</span>
-                        <div className="flex flex-col gap-2">
-                          <input
-                            type="file"
-                            accept="image/*"
-                            onChange={handleLocalImageUpload}
-                            className="hidden"
-                            id="image-file-upload"
-                          />
-                          <label
-                            htmlFor="image-file-upload"
-                            className="py-2 px-3 bg-slate-900 hover:bg-slate-850 border border-slate-800 rounded-lg text-xs font-bold text-center cursor-pointer flex items-center justify-center gap-1.5 transition-colors"
-                          >
-                            <UploadCloud className="h-4 w-4" /> رفع صورة كروكي
-                          </label>
-                          {additionalImage && (
-                            <div className="relative h-12 w-12 rounded border border-slate-800 overflow-hidden mx-auto">
-                              <img src={additionalImage} className="h-full w-full object-cover" />
-                              <button
-                                onClick={() => setAdditionalImage(null)}
-                                className="absolute inset-0 bg-black/60 opacity-0 hover:opacity-100 text-[10px] text-rose-400 transition-opacity font-bold"
-                              >
-                                حذف
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      </div>
+                    <div className="bg-slate-950 p-2 flex border-b border-slate-800/80">
+                      <button
+                        type="button"
+                        onClick={() => setActiveFeedbackTab('audio')}
+                        className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+                          activeFeedbackTab === 'audio' ? 'bg-sky-600/10 border border-sky-500/20 text-sky-400' : 'text-slate-400 hover:text-slate-200 font-normal'
+                        }`}
+                      >
+                        <Mic className="h-4 w-4" /> صوت
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setActiveFeedbackTab('video')}
+                        className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+                          activeFeedbackTab === 'video' ? 'bg-sky-600/10 border border-sky-500/20 text-sky-400' : 'text-slate-400 hover:text-slate-200 font-normal'
+                        }`}
+                      >
+                        <FileVideo className="h-4 w-4" /> فيديو
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setActiveFeedbackTab('image')}
+                        className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+                          activeFeedbackTab === 'image' ? 'bg-sky-600/10 border border-sky-500/20 text-sky-400' : 'text-slate-400 hover:text-slate-200 font-normal'
+                        }`}
+                      >
+                        <Camera className="h-4 w-4" /> صورة
+                      </button>
+                    </div>
 
-                      {/* Audio recorder / Upload */}
-                      <div className="space-y-2 bg-slate-950 p-4 rounded-xl border border-slate-800/40">
-                        <span className="text-[11px] font-bold text-slate-400 block">تسجيل رسالة صوتية للمعلم</span>
-                        <div className="flex flex-col gap-2">
-                          <div className="flex gap-2">
-                            {!recordingAudio ? (
-                              <button
-                                onClick={startAudioRecording}
-                                className="flex-1 py-2 px-3 bg-slate-900 hover:bg-slate-850 border border-slate-800 rounded-lg text-xs font-bold flex items-center justify-center gap-1"
+                    <div className="p-6 bg-slate-900/40">
+                      {/* Audio Tab */}
+                      {activeFeedbackTab === 'audio' && (
+                        <div className="space-y-4">
+                          <div className="flex flex-col sm:flex-row gap-4 items-stretch sm:items-center">
+                            <div className="flex-1 flex gap-2">
+                              {!recordingAudio ? (
+                                <button
+                                  type="button"
+                                  onClick={startAudioRecording}
+                                  className="flex-grow py-3 px-4 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow-lg active:scale-95 transition-transform"
+                                >
+                                  <Mic className="h-4 w-4 animate-pulse" /> بدء تسجيل صوت المعجم المباشر
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={stopAudioRecording}
+                                  className="flex-grow py-3 px-4 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow-lg active:scale-95 transition-transform"
+                                >
+                                  <Volume2 className="h-4 w-4 animate-bounce" /> إيقاف التسجيل الصوتي
+                                </button>
+                              )}
+
+                              <input
+                                type="file"
+                                accept="audio/*"
+                                onChange={handleLocalAudioUpload}
+                                className="hidden"
+                                id="audio-uploader-whiteboard"
+                              />
+                              <label
+                                htmlFor="audio-uploader-whiteboard"
+                                className="p-3 bg-slate-950 hover:bg-slate-850 border border-slate-800 rounded-xl cursor-pointer flex items-center justify-center text-slate-400 hover:text-white transition-colors"
+                                title="رفع ملف صوت مسبق التسجيل"
                               >
-                                <Mic className="h-4 w-4 text-emerald-400 animate-pulse" /> ابدأ التسجيل
-                              </button>
-                            ) : (
-                              <button
-                                onClick={stopAudioRecording}
-                                className="flex-1 py-2 px-3 bg-rose-600 hover:bg-rose-700 rounded-lg text-xs font-bold flex items-center justify-center gap-1"
-                              >
-                                <Volume2 className="h-4 w-4 animate-bounce" /> إيقاف الميكروفون
-                              </button>
-                            )}
-                            <input
-                              type="file"
-                              accept="audio/*"
-                              onChange={handleLocalAudioUpload}
-                              className="hidden"
-                              id="audio-file-upload"
-                            />
-                            <label
-                              htmlFor="audio-file-upload"
-                              className="p-2 bg-slate-900 hover:bg-slate-850 border border-slate-800 rounded-lg cursor-pointer"
-                            >
-                              <Paperclip className="h-4 w-4 text-slate-400" />
-                            </label>
+                                <Paperclip className="h-4 w-4" />
+                              </label>
+                            </div>
                           </div>
+
                           {additionalAudio && (
-                            <div className="flex items-center gap-2 bg-slate-900 p-2 rounded border border-slate-800">
-                              <audio src={additionalAudio} controls className="h-6 w-full scale-90" />
-                              <button
-                                onClick={() => setAdditionalAudio(null)}
-                                className="text-[10px] font-bold text-rose-500 hover:text-rose-400"
-                              >
-                                حذف
-                              </button>
+                            <div className="bg-slate-950 p-4 rounded-xl border border-slate-850 flex flex-col sm:flex-row items-center justify-between gap-4">
+                              <div className="flex items-center gap-2">
+                                <CheckCircle className="h-5 w-5 text-emerald-400 shrink-0" />
+                                <div className="text-[11px]">
+                                  <span className="font-bold text-slate-300 block">تم تجهيز ملف الرد الصوتي</span>
+                                  <span className="text-slate-500 text-[9px]">سيتم رفعه وتحديثه تلقائياً عند الحفظ النهائي</span>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-3 w-full sm:w-auto">
+                                <audio src={additionalAudio} controls className="h-8 w-full sm:w-48" />
+                                <button
+                                  type="button"
+                                  onClick={() => setAdditionalAudio(null)}
+                                  className="p-2 bg-slate-900 hover:bg-slate-850 text-rose-500 hover:text-rose-400 rounded-lg text-xs font-bold transition-all"
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </button>
+                              </div>
                             </div>
                           )}
                         </div>
-                      </div>
+                      )}
 
-                      {/* Video recorder / Upload */}
-                      <div className="space-y-2 bg-slate-950 p-4 rounded-xl border border-slate-800/40">
-                        <span className="text-[11px] font-bold text-slate-400 block">تسجيل مقطع توضيحي مرئي</span>
-                        <div className="flex flex-col gap-2">
-                          <div className="flex gap-2">
-                            {!recordingVideo ? (
-                              <button
-                                onClick={startVideoRecording}
-                                className="flex-1 py-2 px-3 bg-slate-900 hover:bg-slate-850 border border-slate-800 rounded-lg text-xs font-bold flex items-center justify-center gap-1"
+                      {/* Video Tab */}
+                      {activeFeedbackTab === 'video' && (
+                        <div className="space-y-4">
+                          <div className="flex flex-col gap-4">
+                            <div className="flex gap-2">
+                              {!recordingVideo ? (
+                                <button
+                                  type="button"
+                                  onClick={startVideoRecording}
+                                  className="flex-1 py-3 px-4 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow-lg transition-colors"
+                                >
+                                  <Camera className="h-4 w-4" /> بدء الكاميرا وتسجيل توضيح مرئي مباشر
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={stopVideoRecording}
+                                  className="flex-1 py-3 px-4 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow-lg transition-colors"
+                                >
+                                  <X className="h-4 w-4" /> إيقاف وحفظ مقطع الفيديو التوضيحي
+                                </button>
+                              )}
+
+                              <input
+                                type="file"
+                                accept="video/*"
+                                onChange={handleLocalVideoUpload}
+                                className="hidden"
+                                id="video-uploader-whiteboard"
+                              />
+                              <label
+                                htmlFor="video-uploader-whiteboard"
+                                className="p-3 bg-slate-950 hover:bg-slate-850 border border-slate-800 rounded-xl cursor-pointer flex items-center justify-center text-slate-400 hover:text-white transition-colors"
+                                title="رفع ملف فيديو توضيحي"
                               >
-                                <Camera className="h-4 w-4 text-emerald-400" /> تسجيل فيديو كاميرا
+                                <Paperclip className="h-4 w-4" />
+                              </label>
+                            </div>
+
+                            {recordingVideo && (
+                              <div className="bg-slate-950 p-2 rounded-2xl border border-slate-850 overflow-hidden aspect-video max-w-sm mx-auto relative">
+                                <video
+                                  ref={videoPreviewRefCallback}
+                                  autoPlay
+                                  playsInline
+                                  muted
+                                  className="w-full rounded-xl object-cover"
+                                />
+                              </div>
+                            )}
+
+                            {additionalVideo && !recordingVideo && (
+                              <div className="bg-slate-950 p-4 rounded-xl border border-slate-850 flex flex-col sm:flex-row items-center justify-between gap-4">
+                                <div className="flex items-center gap-2">
+                                  <CheckCircle className="h-5 w-5 text-emerald-400 shrink-0" />
+                                  <div className="text-[11px]">
+                                    <span className="font-bold text-slate-300 block">تم تسجيل/رفع مقطع الفيديو</span>
+                                    <span className="text-slate-500 text-[9px]">سيتم رفعه وتحديثه تلقائياً عند الحفظ النهائي</span>
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-3">
+                                  <video src={additionalVideo} controls className="h-12 w-24 rounded" />
+                                  <button
+                                    type="button"
+                                    onClick={() => setAdditionalVideo(null)}
+                                    className="p-2 bg-slate-900 hover:bg-slate-850 text-rose-500 hover:text-rose-400 rounded-lg text-xs font-bold transition-all"
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Image/Sketch Tab */}
+                      {activeFeedbackTab === 'image' && (
+                        <div className="space-y-4">
+                          <div className="flex gap-2">
+                            {!isPhotoCameraOpen ? (
+                              <button
+                                type="button"
+                                onClick={startPhotoCamera}
+                                className="flex-grow py-3 px-4 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow-lg transition-colors"
+                              >
+                                <Camera className="h-4 w-4" /> تشغيل الكاميرا لالتقاط كروكي فوري
                               </button>
                             ) : (
-                              <button
-                                onClick={stopVideoRecording}
-                                className="flex-1 py-2 px-3 bg-rose-600 hover:bg-rose-700 rounded-lg text-xs font-bold flex items-center justify-center gap-1"
-                              >
-                                إيقاف الكاميرا والتسجيل
-                              </button>
+                              <div className="flex-grow flex gap-2">
+                                <button
+                                  type="button"
+                                  onClick={capturePhoto}
+                                  className="flex-grow py-3 px-4 bg-teal-600 hover:bg-teal-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow-lg"
+                                >
+                                  <Check className="h-4 w-4" /> التقاط الصورة وتثبيتها
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={stopPhotoCamera}
+                                  className="py-3 px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-semibold"
+                                >
+                                  إلغاء
+                                </button>
+                              </div>
                             )}
+
                             <input
                               type="file"
-                              accept="video/*"
-                              onChange={handleLocalVideoUpload}
+                              accept="image/*"
+                              onChange={handleLocalImageUpload}
                               className="hidden"
-                              id="video-file-upload"
+                              id="image-uploader-whiteboard"
                             />
                             <label
-                              htmlFor="video-file-upload"
-                              className="p-2 bg-slate-900 hover:bg-slate-850 border border-slate-800 rounded-lg cursor-pointer"
+                              htmlFor="image-uploader-whiteboard"
+                              className="p-3 bg-slate-950 hover:bg-slate-850 border border-slate-800 rounded-xl cursor-pointer flex items-center justify-center text-slate-400 hover:text-white transition-colors"
+                              title="رفع كروكي حل مجهز مسبقاً"
                             >
-                              <Paperclip className="h-4 w-4 text-slate-400" />
+                              <Paperclip className="h-4 w-4" />
                             </label>
                           </div>
 
-                          {recordingVideo && (
-                            <video
-                              ref={videoPreviewRef}
-                              autoPlay
-                              playsInline
-                              muted
-                              className="h-16 w-full rounded border border-slate-800 object-cover"
-                            />
+                          {isPhotoCameraOpen && (
+                            <div className="bg-slate-950 p-2 rounded-2xl border border-slate-850 overflow-hidden max-w-sm mx-auto relative">
+                              <video
+                                ref={photoCameraRefCallback}
+                                autoPlay
+                                playsInline
+                                className="w-full rounded-xl object-cover"
+                              />
+                            </div>
                           )}
 
-                          {additionalVideo && !recordingVideo && (
-                            <div className="flex items-center gap-2 bg-slate-900 p-2 rounded border border-slate-800">
-                              <span className="text-[10px] text-emerald-400 flex items-center gap-1">
-                                <CheckCircle className="h-3 w-3" /> تم تسجيل/رفع المقطع
-                              </span>
-                              <button
-                                onClick={() => setAdditionalVideo(null)}
-                                className="text-[10px] font-bold text-rose-500 hover:text-rose-400 ml-auto"
-                              >
-                                حذف
-                              </button>
+                          {additionalImages.length > 0 && (
+                            <div className="space-y-3 w-full">
+                              <span className="text-slate-400 text-xs font-semibold block">الصور المرفقة ({additionalImages.length}):</span>
+                              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                                {additionalImages.map((imgSrc, idx) => (
+                                  <div key={idx} className="bg-slate-950 p-2 rounded-xl border border-slate-850 flex flex-col gap-2 relative group">
+                                    <div className="aspect-square w-full rounded-lg border border-slate-800 overflow-hidden relative">
+                                      <img src={imgSrc} className="h-full w-full object-cover animate-fade-in" />
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setAdditionalImages((prev) => prev.filter((_, i) => i !== idx));
+                                        }}
+                                        className="absolute top-1.5 right-1.5 p-1.5 bg-rose-600 hover:bg-rose-500 rounded-lg text-white transition-all shadow-md active:scale-90"
+                                        title="حذف الصورة"
+                                      >
+                                        <Trash2 className="h-3.5 w-3.5" />
+                                      </button>
+                                    </div>
+                                    <div className="text-[10px] text-slate-400 text-center font-mono font-bold">صورة {idx + 1}</div>
+                                  </div>
+                                ))}
+                              </div>
+                              <p className="text-[10px] text-slate-500 leading-relaxed bg-slate-950/60 p-2.5 rounded-xl border border-slate-850/60">
+                                سيتم دمج جميع هذه الصور المرفقة تلقائياً عند الحفظ لتخزينها بشكل سليم ومنسق.
+                              </p>
                             </div>
                           )}
                         </div>
-                      </div>
+                      )}
                     </div>
                   </motion.div>
                 )}

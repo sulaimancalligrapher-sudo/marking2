@@ -1,6 +1,6 @@
 {
   "name": "Lesson Correction Dashboard",
   "description": "A Google Sheets-powered dashboard for correcting student lessons with drawing tools, stickers, and media uploads.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["camera", "microphone"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

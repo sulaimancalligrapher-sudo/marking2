@@ -1,5 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { RefreshCw, ZoomIn, ZoomOut, Maximize, RotateCw, Undo, Redo, HelpCircle } from 'lucide-react';
+import { WatermarkSettings } from '../types';
 
 interface Point {
   x: number;
@@ -48,6 +49,9 @@ interface CanvasEditorProps {
   editorRef: React.MutableRefObject<any>;
   scale: number;
   setScale: React.Dispatch<React.SetStateAction<number>>;
+  watermarkSettings?: WatermarkSettings | null;
+  watermarkLogoBase64?: string | null;
+  applyWatermark?: boolean;
 }
 
 export default function CanvasEditor({
@@ -65,7 +69,10 @@ export default function CanvasEditor({
   onSaveCanvas,
   editorRef,
   scale,
-  setScale
+  setScale,
+  watermarkSettings = null,
+  watermarkLogoBase64 = null,
+  applyWatermark = false
 }: CanvasEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -82,6 +89,19 @@ export default function CanvasEditor({
   const [redoHistory, setRedoHistory] = useState<Array<{ type: 'path' | 'sticker' | 'text'; data: any }>>([]);
 
   const [imgElement, setImgElement] = useState<HTMLImageElement | null>(null);
+  const [logoElement, setLogoElement] = useState<HTMLImageElement | null>(null);
+
+  useEffect(() => {
+    if (watermarkLogoBase64) {
+      const img = new Image();
+      img.onload = () => {
+        setLogoElement(img);
+      };
+      img.src = watermarkLogoBase64;
+    } else {
+      setLogoElement(null);
+    }
+  }, [watermarkLogoBase64]);
 
   // Pan / Zoom refs
   const dragStart = useRef({ x: 0, y: 0 });
@@ -251,6 +271,151 @@ export default function CanvasEditor({
   const exportCanvas = (): string => {
     const canvas = canvasRef.current;
     if (!canvas) return '';
+
+    if (applyWatermark && watermarkSettings) {
+      const clone = document.createElement('canvas');
+      clone.width = canvas.width;
+      clone.height = canvas.height;
+      const cloneCtx = clone.getContext('2d');
+      if (cloneCtx) {
+        // Draw the main canvas content
+        cloneCtx.drawImage(canvas, 0, 0);
+
+        // Helper parsers to make watermark configuration flexible & percentage-based as requested
+        const parseOpacity = (val: string | number | undefined): number => {
+          if (val === undefined || val === null || val === '') return 1.0;
+          const s = String(val).trim();
+          if (s.endsWith('%')) {
+            const p = parseFloat(s.replace('%', ''));
+            return isNaN(p) ? 1.0 : p / 100;
+          }
+          const num = parseFloat(s);
+          if (isNaN(num)) return 1.0;
+          if (num > 1.0) return num / 100; // e.g. "50" -> 0.5
+          return num;
+        };
+
+        const parseSizeFactor = (val: string | number | undefined): number => {
+          if (val === undefined || val === null || val === '') return 0.15; // default to 15% of canvas width
+          const s = String(val).trim();
+          if (s.endsWith('%')) {
+            const p = parseFloat(s.replace('%', ''));
+            return isNaN(p) ? 0.15 : p / 100;
+          }
+          const num = parseFloat(s);
+          if (isNaN(num)) return 0.15;
+          if (num > 1.0) return num / 100; // e.g. "15" -> 0.15
+          return num;
+        };
+
+        const parseFontSize = (val: string | number | undefined, canvasWidth: number): number => {
+          if (val === undefined || val === null || val === '') return canvasWidth * 0.02; // default to 2% of canvas width
+          const s = String(val).trim();
+          if (s.endsWith('%')) {
+            const pct = parseFloat(s.replace('%', ''));
+            return isNaN(pct) ? canvasWidth * 0.02 : canvasWidth * (pct / 100);
+          }
+          const num = parseFloat(s);
+          if (isNaN(num)) return canvasWidth * 0.02;
+          if (num < 1.0) {
+            return canvasWidth * num;
+          } else if (num <= 10) {
+            return canvasWidth * (num / 100); // e.g. 2.5 means 2.5% of canvas width
+          } else {
+            const scaleFactor = canvasWidth / 1200;
+            return num * scaleFactor;
+          }
+        };
+
+        // 1. Draw Logo
+        if (logoElement) {
+          const logoWidthRatio = parseSizeFactor(watermarkSettings.sizeFactor);
+          // Calculate the logo width relative to canvas width
+          const logoWidth = canvas.width * logoWidthRatio;
+          
+          // Maintain the original aspect ratio (width & height proportion)
+          const logoAspect = logoElement.naturalHeight / logoElement.naturalWidth;
+          const logoHeight = logoWidth * logoAspect;
+          
+          const logoPadding = Math.min(canvas.width, canvas.height) * 0.04;
+
+          let logoX = logoPadding;
+          let logoY = logoPadding;
+
+          if (watermarkSettings.logoPosition === 'top-left') {
+            logoX = logoPadding;
+            logoY = logoPadding;
+          } else if (watermarkSettings.logoPosition === 'top-right') {
+            logoX = canvas.width - logoWidth - logoPadding;
+            logoY = logoPadding;
+          } else if (watermarkSettings.logoPosition === 'bottom-left') {
+            logoX = logoPadding;
+            logoY = canvas.height - logoHeight - logoPadding;
+          } else if (watermarkSettings.logoPosition === 'bottom-right') {
+            logoX = canvas.width - logoWidth - logoPadding;
+            logoY = canvas.height - logoHeight - logoPadding;
+          } else if (watermarkSettings.logoPosition === 'center') {
+            logoX = (canvas.width - logoWidth) / 2;
+            logoY = (canvas.height - logoHeight) / 2;
+          }
+
+          cloneCtx.save();
+          cloneCtx.globalAlpha = parseOpacity(watermarkSettings.opacity);
+          cloneCtx.drawImage(logoElement, logoX, logoY, logoWidth, logoHeight);
+          cloneCtx.restore();
+        }
+
+        // 2. Draw Text
+        if (watermarkSettings.textPrefix) {
+          const computedFontSize = Math.max(14, parseFontSize(watermarkSettings.fontSize, canvas.width));
+          const textPadding = Math.min(canvas.width, canvas.height) * 0.04;
+
+          cloneCtx.save();
+          cloneCtx.direction = 'rtl';
+          cloneCtx.font = `bold ${computedFontSize}px Amiri, Cairo, system-ui, sans-serif`;
+          cloneCtx.shadowColor = 'rgba(0,0,0,0.85)';
+          cloneCtx.shadowBlur = 6;
+          cloneCtx.fillStyle = '#FFFFFF';
+
+          const textToDraw = watermarkSettings.textPrefix;
+          const textHeight = computedFontSize;
+
+          let textX = textPadding;
+          let textY = canvas.height - textPadding;
+
+          if (watermarkSettings.textPosition === 'top-left') {
+            textX = textPadding;
+            textY = textPadding + textHeight;
+          } else if (watermarkSettings.textPosition === 'top-right') {
+            textX = canvas.width - textPadding;
+            textY = textPadding + textHeight;
+          } else if (watermarkSettings.textPosition === 'bottom-left') {
+            textX = textPadding;
+            textY = canvas.height - textPadding;
+          } else if (watermarkSettings.textPosition === 'bottom-right') {
+            textX = canvas.width - textPadding;
+            textY = canvas.height - textPadding;
+          } else if (watermarkSettings.textPosition === 'center') {
+            textX = canvas.width / 2;
+            textY = canvas.height / 2 + textHeight / 2;
+          }
+
+          if (watermarkSettings.textPosition.includes('right')) {
+            cloneCtx.textAlign = 'right';
+          } else if (watermarkSettings.textPosition.includes('left')) {
+            cloneCtx.textAlign = 'left';
+          } else {
+            cloneCtx.textAlign = 'center';
+          }
+
+          cloneCtx.fillText(textToDraw, textX, textY);
+          cloneCtx.restore();
+        }
+
+        return clone.toDataURL('image/jpeg', 0.95);
+      }
+    }
+
     return canvas.toDataURL('image/jpeg', 0.95);
   };
 
