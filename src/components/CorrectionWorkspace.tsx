@@ -67,6 +67,13 @@ export function formatTime(timeInSeconds: number): string {
   return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
 }
 
+// Module-level cache variables to store settings once per session to eliminate extreme delay and lag
+let cachedPredefinedTexts: PredefinedText[] | null = null;
+let cachedStickersList: string[] | null = null;
+let cachedAdditionalHeaders: string[] | null = null;
+let cachedWatermarkSettings: WatermarkSettings | null = null;
+let cachedWatermarkLogoBase64: string | null = null;
+
 interface CorrectionWorkspaceProps {
   submission: StudentSubmission;
   onBack: () => void;
@@ -88,6 +95,8 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
   const [additionalHeaders, setAdditionalHeaders] = useState<string[]>([]);
   const [watermarkSettings, setWatermarkSettings] = useState<WatermarkSettings | null>(null);
   const [watermarkLogoBase64, setWatermarkLogoBase64] = useState<string | null>(null);
+  const [savingWatermark, setSavingWatermark] = useState(false);
+  const [watermarkSaveStatus, setWatermarkSaveStatus] = useState<string | null>(null);
 
   // Workspace controls state
   const [toolGroup, setToolGroup] = useState<'draw' | 'textSticker' | 'other'>('draw');
@@ -206,17 +215,33 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
       setLoading(true);
       setError(null);
 
-      // Load static settings in parallel
-      const [texts, stickers, headers, watermarkConf] = await Promise.all([
-        gasApi.getPredefinedTexts(),
-        gasApi.getStickerUrls(),
-        gasApi.getAdditionalHeaders(),
-        gasApi.getWatermarkSettings()
-      ]);
+      // Load static settings in parallel ONLY if they are not already cached to prevent massive delays
+      const loadPromises: Promise<any>[] = [];
+      let texts = cachedPredefinedTexts;
+      let stickers = cachedStickersList;
+      let headers = cachedAdditionalHeaders;
+      let watermarkConf = cachedWatermarkSettings;
 
-      setPredefinedTexts(texts);
-      setStickersList(stickers);
-      setAdditionalHeaders(headers);
+      if (!texts) {
+        loadPromises.push(gasApi.getPredefinedTexts().then(res => { texts = res; cachedPredefinedTexts = res; }));
+      }
+      if (!stickers) {
+        loadPromises.push(gasApi.getStickerUrls().then(res => { stickers = res; cachedStickersList = res; }));
+      }
+      if (!headers) {
+        loadPromises.push(gasApi.getAdditionalHeaders().then(res => { headers = res; cachedAdditionalHeaders = res; }));
+      }
+      if (!watermarkConf) {
+        loadPromises.push(gasApi.getWatermarkSettings().then(res => { watermarkConf = res; cachedWatermarkSettings = res; }));
+      }
+
+      if (loadPromises.length > 0) {
+        await Promise.all(loadPromises);
+      }
+
+      setPredefinedTexts(texts || []);
+      setStickersList(stickers || []);
+      setAdditionalHeaders(headers || []);
 
       // Check for local storage watermark settings override
       const savedLocalWatermark = localStorage.getItem('localWatermarkSettings');
@@ -231,28 +256,25 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
       setWatermarkSettings(finalWatermarkConf);
 
       if (finalWatermarkConf && finalWatermarkConf.logoUrl) {
-        const fileId = getGoogleDriveFileId(finalWatermarkConf.logoUrl);
-        if (fileId) {
-          try {
-            const logoB64 = await gasApi.getMediaAsBase64(fileId);
-            setWatermarkLogoBase64(logoB64);
-          } catch (e) {
-            console.error('Failed to load watermark logo base64', e);
-          }
+        if (cachedWatermarkLogoBase64) {
+          setWatermarkLogoBase64(cachedWatermarkLogoBase64);
         } else {
-          setWatermarkLogoBase64(finalWatermarkConf.logoUrl);
+          const fileId = getGoogleDriveFileId(finalWatermarkConf.logoUrl);
+          if (fileId) {
+            try {
+              const logoB64 = await gasApi.getMediaAsBase64(fileId);
+              cachedWatermarkLogoBase64 = logoB64;
+              setWatermarkLogoBase64(logoB64);
+            } catch (e) {
+              console.error('Failed to load watermark logo base64', e);
+            }
+          } else {
+            setWatermarkLogoBase64(finalWatermarkConf.logoUrl);
+          }
         }
       }
 
-      // Fetch base64 images for stickers to load them instantly on demand
-      stickers.forEach(async (id) => {
-        try {
-          const b64 = await gasApi.getMediaAsBase64(id);
-          setStickerImages((prev) => ({ ...prev, [id]: b64 }));
-        } catch (e) {
-          console.error('Failed to load sticker image ' + id, e);
-        }
-      });
+      // Base64 images for stickers will be fetched on-demand when clicked to avoid network congestion and API timeout.
 
       // Load student submission image or audio
       if (submission.isSaved) {
@@ -262,13 +284,46 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
         setImageGrade(savedData.imageGrade || '');
         setAudioGrade(savedData.audioGrade || '');
 
-        setAdditionalImage(savedData.additionalImage || null);
-        setAdditionalImages(savedData.additionalImage ? [savedData.additionalImage] : []);
-        setAdditionalVideo(savedData.video || null);
-        setAdditionalAudio(savedData.audio || null);
+        // Smart media URL and CDN resolution
+        let resolvedModifiedImage = savedData.modifiedImage;
+        if (resolvedModifiedImage && (resolvedModifiedImage.startsWith('http') || resolvedModifiedImage.startsWith('1'))) {
+          const driveId = getGoogleDriveFileId(resolvedModifiedImage);
+          if (driveId) {
+            resolvedModifiedImage = `https://lh3.googleusercontent.com/d/${driveId}=s1600`;
+          }
+        }
 
-        if (savedData.modifiedImage) {
-          setStudentImageBase64(savedData.modifiedImage);
+        let resolvedAdditionalImage = savedData.additionalImage;
+        if (resolvedAdditionalImage && (resolvedAdditionalImage.startsWith('http') || resolvedAdditionalImage.startsWith('1'))) {
+          const driveId = getGoogleDriveFileId(resolvedAdditionalImage);
+          if (driveId) {
+            resolvedAdditionalImage = `https://lh3.googleusercontent.com/d/${driveId}=s1600`;
+          }
+        }
+
+        setAdditionalImage(resolvedAdditionalImage || null);
+        setAdditionalImages(resolvedAdditionalImage ? [resolvedAdditionalImage] : []);
+
+        let resolvedVideo = savedData.video;
+        if (resolvedVideo && (resolvedVideo.startsWith('http') || resolvedVideo.startsWith('1'))) {
+          const driveId = getGoogleDriveFileId(resolvedVideo);
+          if (driveId) {
+            resolvedVideo = `https://docs.google.com/uc?export=download&id=${driveId}`;
+          }
+        }
+        setAdditionalVideo(resolvedVideo || null);
+
+        let resolvedAudio = savedData.audio;
+        if (resolvedAudio && (resolvedAudio.startsWith('http') || resolvedAudio.startsWith('1'))) {
+          const driveId = getGoogleDriveFileId(resolvedAudio);
+          if (driveId) {
+            resolvedAudio = `https://docs.google.com/uc?export=download&id=${driveId}`;
+          }
+        }
+        setAdditionalAudio(resolvedAudio || null);
+
+        if (resolvedModifiedImage) {
+          setStudentImageBase64(resolvedModifiedImage);
         } else {
           // Fallback if modified is missing
           await loadOriginalImage();
@@ -298,8 +353,20 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
 
   const loadOriginalImage = async () => {
     if (submission.imageFileId) {
-      const b64 = await gasApi.getMediaAsBase64(submission.imageFileId);
-      setStudentImageBase64(b64);
+      try {
+        const driveId = getGoogleDriveFileId(submission.imageFileId);
+        if (driveId) {
+          const directUrl = `https://lh3.googleusercontent.com/d/${driveId}=s1600`;
+          setStudentImageBase64(directUrl);
+        } else {
+          const b64 = await gasApi.getMediaAsBase64(submission.imageFileId);
+          setStudentImageBase64(b64);
+        }
+      } catch (err) {
+        console.warn("Failed to load image from fast Google Drive CDN, falling back to Apps Script Base64", err);
+        const b64 = await gasApi.getMediaAsBase64(submission.imageFileId);
+        setStudentImageBase64(b64);
+      }
     }
   };
 
@@ -311,21 +378,16 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
     try {
       const driveId = getGoogleDriveFileId(submission.audioFileId);
       if (driveId) {
-        const b64 = await gasApi.getMediaAsBase64(driveId);
-        if (b64) {
-          const src = b64.startsWith('data:') ? b64 : `data:audio/mp3;base64,${b64}`;
-          setResolvedAudioSrc(src);
-        } else {
-          // fallback to download stream proxy
-          setResolvedAudioSrc(`https://docs.google.com/uc?export=download&id=${driveId}`);
-        }
+        // Direct stream URL for Google Drive audio files is super fast, reliable and doesn't load Apps Script
+        const directUrl = `https://docs.google.com/uc?export=download&id=${driveId}`;
+        setResolvedAudioSrc(directUrl);
+      } else if (submission.audioFileId.startsWith('data:')) {
+        setResolvedAudioSrc(submission.audioFileId);
       } else {
-        // Play directly if it's already a clean link
         setResolvedAudioSrc(submission.audioFileId);
       }
     } catch (e) {
-      console.error('Failed to load audio file base64:', e);
-      // Fallback
+      console.error('Failed to load audio file:', e);
       const driveId = getGoogleDriveFileId(submission.audioFileId);
       if (driveId) {
         setResolvedAudioSrc(`https://docs.google.com/uc?export=download&id=${driveId}`);
@@ -740,6 +802,28 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
     }
   };
 
+  const handleSaveWatermarkSettingsToCloud = async () => {
+    if (!watermarkSettings) return;
+    setSavingWatermark(true);
+    setWatermarkSaveStatus(null);
+    try {
+      const res = await gasApi.saveWatermarkSettings(watermarkSettings);
+      if (res.success) {
+        setWatermarkSaveStatus('success');
+        // clear local storage since sheet is now updated with these values
+        localStorage.removeItem('localWatermarkSettings');
+        setTimeout(() => setWatermarkSaveStatus(null), 4000);
+      } else {
+        setWatermarkSaveStatus('error:' + (res.message || 'فشل الحفظ'));
+      }
+    } catch (e: any) {
+      console.error('Failed to save watermark settings to cloud', e);
+      setWatermarkSaveStatus('error:' + (e.message || 'خطأ في الاتصال بالشبكة'));
+    } finally {
+      setSavingWatermark(false);
+    }
+  };
+
   // Saving All Media to database (Google Sheet + Drive Folder)
   const handleSaveCorrection = async () => {
     setSaving(true);
@@ -909,10 +993,18 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
     }
   };
 
-  const selectSticker = (id: string) => {
-    const b64 = stickerImages[id];
+  const selectSticker = async (id: string) => {
+    setSelectedStickerId(id);
+    let b64 = stickerImages[id];
+    if (!b64) {
+      try {
+        b64 = await gasApi.getMediaAsBase64(id);
+        setStickerImages((prev) => ({ ...prev, [id]: b64 }));
+      } catch (e) {
+        console.error('Failed to load selected sticker base64', e);
+      }
+    }
     if (b64) {
-      setSelectedStickerId(id);
       setSelectedStickerBase64(b64);
       setMode('sticker');
     }
@@ -1809,18 +1901,29 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                         <div className="grid grid-cols-4 gap-2.5 bg-slate-950 p-3 rounded-xl border border-slate-800/50 max-h-[14rem] overflow-y-auto">
                           {stickersList.map((id) => {
                             const b64 = stickerImages[id];
+                            const isLoadingThis = selectedStickerId === id && !b64;
                             return (
                               <button
                                 key={id}
                                 onClick={() => selectSticker(id)}
-                                className={`p-1 bg-slate-900 rounded-lg hover:bg-slate-850 border transition-all ${
+                                disabled={isLoadingThis}
+                                className={`p-1 bg-slate-900 rounded-lg hover:bg-slate-850 border transition-all relative min-h-[48px] flex items-center justify-center ${
                                   selectedStickerId === id ? 'border-emerald-500 ring-1 ring-emerald-500/20' : 'border-transparent'
                                 }`}
                               >
-                                {b64 ? (
-                                  <img src={b64} alt="ختم" className="h-10 w-10 mx-auto object-contain" referrerPolicy="no-referrer" />
+                                {isLoadingThis ? (
+                                  <RotateCw className="h-4 w-4 text-emerald-500 animate-spin" />
                                 ) : (
-                                  <div className="h-10 w-10 flex items-center justify-center text-[10px] text-slate-600">تحميل</div>
+                                  <img 
+                                    src={b64 || `https://lh3.googleusercontent.com/d/${id}`} 
+                                    alt="ختم" 
+                                    className="h-10 w-10 mx-auto object-contain" 
+                                    referrerPolicy="no-referrer"
+                                    onError={(e) => {
+                                      // Fallback to docs.google.com direct download in case of region/IP blocks on lh3 server
+                                      (e.target as HTMLImageElement).src = `https://docs.google.com/uc?export=download&id=${id}`;
+                                    }}
+                                  />
                                 )}
                               </button>
                             );
@@ -2038,6 +2141,37 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                             onChange={(e) => handleUpdateWatermarkSetting('opacity', Number(e.target.value) / 100)}
                             className="w-full accent-emerald-500 bg-slate-800 h-1 rounded"
                           />
+                        </div>
+
+                        {/* Save to Google Sheets button */}
+                        <div className="pt-2 border-t border-slate-900 space-y-2">
+                          <button
+                            type="button"
+                            onClick={handleSaveWatermarkSettingsToCloud}
+                            disabled={savingWatermark}
+                            className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-sm active:scale-95"
+                          >
+                            {savingWatermark ? (
+                              <RotateCw className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <UploadCloud className="h-3.5 w-3.5" />
+                            )}
+                            <span>حفظ الإعدادات في Google Sheets</span>
+                          </button>
+                          
+                          {watermarkSaveStatus === 'success' && (
+                            <p className="text-[10px] text-center text-emerald-400 font-semibold animate-pulse">
+                              ✓ تم حفظ الإعدادات في الخلايا G2:G8 بنجاح!
+                            </p>
+                          )}
+                          {watermarkSaveStatus?.startsWith('error:') && (
+                            <div className="p-2 rounded bg-rose-950/40 border border-rose-900/40 text-[9px] text-rose-300 leading-relaxed">
+                              {watermarkSaveStatus.replace('error:', '')}
+                              <div className="mt-1 font-mono text-[8px] text-slate-400 leading-tight">
+                                تأكد من لصق كود Apps Script المحدث ليدعم معالجة الإجراء 'saveWatermarkSettings'.
+                              </div>
+                            </div>
+                          )}
                         </div>
                       </div>
                     ) : (

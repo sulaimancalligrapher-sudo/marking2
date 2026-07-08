@@ -47,7 +47,8 @@ export default function Login({ onLoginSuccess, onResetConnection }: LoginProps)
 
     // Look for local matching user
     const user = users.find(
-      u => u.username.toLowerCase() === username.trim().toLowerCase() && u.password === password.trim()
+      u => u.username.toLowerCase() === username.trim().toLowerCase() && 
+           String(u.password ?? '').trim() === password.trim()
     );
 
     if (!user) {

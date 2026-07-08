@@ -81,6 +81,9 @@ export default function CanvasEditor({
   const [offsetY, setOffsetY] = useState(0);
   const [isDrawing, setIsDrawing] = useState(false);
 
+  // Sticker image elements cache to prevent CPU lag/garbage collection thrashing on redraws
+  const stickerImageCache = useRef<Record<string, HTMLImageElement>>({});
+
   // Drawing state
   const [drawnPaths, setDrawnPaths] = useState<Path[]>([]);
   const [stickers, setStickers] = useState<Sticker[]>([]);
@@ -94,6 +97,7 @@ export default function CanvasEditor({
   useEffect(() => {
     if (watermarkLogoBase64) {
       const img = new Image();
+      img.crossOrigin = 'anonymous';
       img.onload = () => {
         setLogoElement(img);
       };
@@ -112,6 +116,7 @@ export default function CanvasEditor({
   useEffect(() => {
     if (imageBase64) {
       const img = new Image();
+      img.crossOrigin = 'anonymous';
       img.onload = () => {
         setImgElement(img);
         setDrawnPaths([]);
@@ -469,13 +474,12 @@ export default function CanvasEditor({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Dimensions
-    if (imgElement) {
-      canvas.width = imgElement.width;
-      canvas.height = imgElement.height;
-    } else {
-      canvas.width = 1200;
-      canvas.height = 800;
+    // Dimensions - ONLY set if they have actually changed to avoid layout thrashing and lag
+    const targetWidth = imgElement ? imgElement.width : 1200;
+    const targetHeight = imgElement ? imgElement.height : 800;
+    if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
     }
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -517,17 +521,20 @@ export default function CanvasEditor({
       }
     });
 
-    // Draw stickers
+    // Draw stickers with caching to prevent severe rendering lag
     stickers.forEach((st) => {
       if (!st.base64) return;
-      const stickerImg = new Image();
-      stickerImg.src = st.base64;
-      if (stickerImg.complete) {
-        ctx.drawImage(stickerImg, st.x, st.y, st.size, st.size);
-      } else {
-        stickerImg.onload = () => {
-          ctx.drawImage(stickerImg, st.x, st.y, st.size, st.size);
+      let img = stickerImageCache.current[st.base64];
+      if (!img) {
+        img = new Image();
+        img.src = st.base64;
+        stickerImageCache.current[st.base64] = img;
+        img.onload = () => {
+          drawAll(); // Redraw once loaded
         };
+      }
+      if (img.complete) {
+        ctx.drawImage(img, st.x, st.y, st.size, st.size);
       }
     });
 
