@@ -8,24 +8,12 @@ import {
 } from './types';
 
 class GasApiService {
-  private cachedAdditionalHeaders: string[] | null = null;
-  private cachedPredefinedTexts: PredefinedText[] | null = null;
-  private cachedStickerUrls: string[] | null = null;
-  private cachedWatermarkSettings: WatermarkSettings | null = null;
-
   private get baseUrl(): string {
     return localStorage.getItem('gas_web_app_url') || '';
   }
 
   public get isConfigured(): boolean {
     return this.baseUrl.length > 0;
-  }
-
-  public clearCache() {
-    this.cachedAdditionalHeaders = null;
-    this.cachedPredefinedTexts = null;
-    this.cachedStickerUrls = null;
-    this.cachedWatermarkSettings = null;
   }
 
   public setConfig(url: string) {
@@ -36,12 +24,10 @@ class GasApiService {
       cleanUrl = cleanUrl.split('?')[0];
     }
     localStorage.setItem('gas_web_app_url', cleanUrl);
-    this.clearCache();
   }
 
   public clearConfig() {
     localStorage.removeItem('gas_web_app_url');
-    this.clearCache();
   }
 
   private async request<T>(params: Record<string, string>, options?: RequestInit): Promise<T> {
@@ -143,44 +129,19 @@ class GasApiService {
   }
 
   public async getAdditionalHeaders(): Promise<string[]> {
-    if (this.cachedAdditionalHeaders) {
-      return this.cachedAdditionalHeaders;
-    }
-    const res = await this.request<string[]>({ action: 'getAdditionalHeaders' });
-    this.cachedAdditionalHeaders = res;
-    return res;
+    return this.request<string[]>({ action: 'getAdditionalHeaders' });
   }
 
   public async getPredefinedTexts(): Promise<PredefinedText[]> {
-    if (this.cachedPredefinedTexts) {
-      return this.cachedPredefinedTexts;
-    }
-    const res = await this.request<PredefinedText[]>({ action: 'getPredefinedTexts' });
-    this.cachedPredefinedTexts = res;
-    return res;
+    return this.request<PredefinedText[]>({ action: 'getPredefinedTexts' });
   }
 
   public async getStickerUrls(): Promise<string[]> {
-    if (this.cachedStickerUrls) {
-      return this.cachedStickerUrls;
-    }
-    const res = await this.request<string[]>({ action: 'getStickerUrls' });
-    this.cachedStickerUrls = res;
-    return res;
+    return this.request<string[]>({ action: 'getStickerUrls' });
   }
 
   public async getWatermarkSettings(): Promise<WatermarkSettings> {
-    if (this.cachedWatermarkSettings) {
-      return this.cachedWatermarkSettings;
-    }
-    const res = await this.request<WatermarkSettings>({ action: 'getWatermarkSettings' });
-    this.cachedWatermarkSettings = res;
-    return res;
-  }
-
-  public async saveWatermarkSettings(settings: WatermarkSettings): Promise<{ success: boolean; message?: string }> {
-    this.cachedWatermarkSettings = settings; // instantly update local cache
-    return this.postRequest<{ success: boolean; message?: string }>('saveWatermarkSettings', { settings });
+    return this.request<WatermarkSettings>({ action: 'getWatermarkSettings' });
   }
 
   public async getUsers(): Promise<User[]> {

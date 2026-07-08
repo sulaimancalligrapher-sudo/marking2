@@ -94,7 +94,6 @@ export default function CanvasEditor({
   useEffect(() => {
     if (watermarkLogoBase64) {
       const img = new Image();
-      img.crossOrigin = 'anonymous';
       img.onload = () => {
         setLogoElement(img);
       };
@@ -113,7 +112,6 @@ export default function CanvasEditor({
   useEffect(() => {
     if (imageBase64) {
       const img = new Image();
-      img.crossOrigin = 'anonymous';
       img.onload = () => {
         setImgElement(img);
         setDrawnPaths([]);
@@ -471,12 +469,13 @@ export default function CanvasEditor({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Dimensions - ONLY set if they have actually changed to avoid layout thrashing and lag
-    const targetWidth = imgElement ? imgElement.width : 1200;
-    const targetHeight = imgElement ? imgElement.height : 800;
-    if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
-      canvas.width = targetWidth;
-      canvas.height = targetHeight;
+    // Dimensions
+    if (imgElement) {
+      canvas.width = imgElement.width;
+      canvas.height = imgElement.height;
+    } else {
+      canvas.width = 1200;
+      canvas.height = 800;
     }
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
