@@ -146,6 +146,8 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
   const [mediaChunks, setMediaChunks] = useState<Blob[]>([]);
   const [audioRecorder, setAudioRecorder] = useState<MediaRecorder | null>(null);
   const [videoRecorder, setVideoRecorder] = useState<MediaRecorder | null>(null);
+  const videoRecorderRef = useRef<MediaRecorder | null>(null);
+  const [videoRecordDuration, setVideoRecordDuration] = useState(0);
   const [videoStream, setVideoStream] = useState<MediaStream | null>(null);
 
   const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
@@ -166,6 +168,8 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
   const [volume, setVolume] = useState(1);
   const [resolvedAudioSrc, setResolvedAudioSrc] = useState<string | null>(null);
   const [loadingAudio, setLoadingAudio] = useState(false);
+  const [audioError, setAudioError] = useState<string | null>(null);
+  const [isFallbackLoading, setIsFallbackLoading] = useState(false);
 
   // Camera capture states for photo
   const [isPhotoCameraOpen, setIsPhotoCameraOpen] = useState(false);
@@ -209,6 +213,32 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
       photoCameraRef.current.srcObject = photoCameraStream;
     }
   }, [photoCameraStream, isPhotoCameraOpen]);
+
+  // Video recording timer with auto-stop after 45 seconds (to keep size extremely small and lightweight)
+  useEffect(() => {
+    let intervalId: any = null;
+    if (recordingVideo) {
+      setVideoRecordDuration(0);
+      intervalId = setInterval(() => {
+        setVideoRecordDuration((prev) => {
+          if (prev >= 44) { // 45 seconds max limit
+            clearInterval(intervalId);
+            setTimeout(() => {
+              stopVideoRecording();
+              alert("تم إيقاف التسجيل تلقائياً بعد الوصول للحد الأقصى (45 ثانية) لضمان عدم تجاوز حجم الملف المسموح به ولنجاح الحفظ.");
+            }, 100);
+            return 45;
+          }
+          return prev + 1;
+        });
+      }, 1000);
+    } else {
+      setVideoRecordDuration(0);
+    }
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [recordingVideo]);
 
   const loadWorkspace = async () => {
     try {
@@ -370,11 +400,33 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
     }
   };
 
+  const fetchAudioAsBase64 = async () => {
+    if (!submission.audioFileId) return;
+    setIsFallbackLoading(true);
+    setAudioError(null);
+    try {
+      const fileId = getGoogleDriveFileId(submission.audioFileId);
+      if (fileId) {
+        const b64 = await gasApi.getMediaAsBase64(fileId);
+        setResolvedAudioSrc(b64);
+        setAudioError(null);
+      } else {
+        throw new Error("لم يتم العثور على معرف ملف صالح.");
+      }
+    } catch (err: any) {
+      console.error("Audio Base64 fallback failed:", err);
+      setAudioError("فشل تشغيل الصوت عبر خادم جوجل. الرجاء تشغيله مباشرة أو التحقق من الصلاحيات.");
+    } finally {
+      setIsFallbackLoading(false);
+    }
+  };
+
   const loadAudioLesson = async () => {
     if (!submission.audioFileId) return;
     setLoadingAudio(true);
     setResolvedAudioSrc(null);
     setIsPlaying(false);
+    setAudioError(null);
     try {
       const driveId = getGoogleDriveFileId(submission.audioFileId);
       if (driveId) {
@@ -388,14 +440,19 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
       }
     } catch (e) {
       console.error('Failed to load audio file:', e);
-      const driveId = getGoogleDriveFileId(submission.audioFileId);
-      if (driveId) {
-        setResolvedAudioSrc(`https://docs.google.com/uc?export=download&id=${driveId}`);
-      } else {
-        setResolvedAudioSrc(submission.audioFileId);
-      }
+      setAudioError("فشل تحميل الصوت المباشر.");
     } finally {
       setLoadingAudio(false);
+    }
+  };
+
+  const handleAudioError = async () => {
+    if (!resolvedAudioSrc) return;
+    if (resolvedAudioSrc.includes('googleusercontent.com') || resolvedAudioSrc.includes('docs.google.com') || resolvedAudioSrc.includes('drive.google.com')) {
+      console.warn("Direct audio load failed inside iframe, falling back to Base64 via Apps Script...");
+      await fetchAudioAsBase64();
+    } else {
+      setAudioError("عذراً، فشل تشغيل الملف الصوتي.");
     }
   };
 
@@ -435,18 +492,34 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
   // Live camera recording helper using web browser native API
   const startVideoRecording = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      // Use constrained resolution for standard, light-weight video size
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+          frameRate: { ideal: 24 }
+        },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true
+        }
+      });
       setVideoStream(stream);
 
-      let options: any = {};
+      // Specify low bitrates to compress video size drastically (~250kbps is clean & small)
+      let options: any = {
+        videoBitsPerSecond: 250000,
+        audioBitsPerSecond: 64000
+      };
+
       if (MediaRecorder.isTypeSupported('video/mp4')) {
-        options = { mimeType: 'video/mp4' };
+        options.mimeType = 'video/mp4';
       } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) {
-        options = { mimeType: 'video/webm;codecs=vp9' };
+        options.mimeType = 'video/webm;codecs=vp9';
       } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8')) {
-        options = { mimeType: 'video/webm;codecs=vp8' };
+        options.mimeType = 'video/webm;codecs=vp8';
       } else if (MediaRecorder.isTypeSupported('video/webm')) {
-        options = { mimeType: 'video/webm' };
+        options.mimeType = 'video/webm';
       }
 
       const recorder = new MediaRecorder(stream, options);
@@ -461,6 +534,15 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
       recorder.onstop = () => {
         const mimeType = recorder.mimeType || 'video/webm';
         const blob = new Blob(chunks, { type: mimeType });
+        
+        // Safety maximum size check
+        const sizeInMB = blob.size / (1024 * 1024);
+        if (sizeInMB > 10) {
+          alert(`حجم الفيديو المسجل كبير جداً (${sizeInMB.toFixed(1)} ميجابايت). الرجاء تسجيل فيديو أقصر لضمان حفظه بنجاح دون أخطاء.`);
+          setAdditionalVideo(null);
+          return;
+        }
+
         const reader = new FileReader();
         reader.onload = (e: any) => {
           setAdditionalVideo(e.target.result);
@@ -468,18 +550,27 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
         reader.readAsDataURL(blob);
       };
 
-      recorder.start();
+      // Start recording and capture chunks every 1 second
+      recorder.start(1000);
       setVideoRecorder(recorder);
+      videoRecorderRef.current = recorder;
       setRecordingVideo(true);
     } catch (e) {
-      alert('لا يمكن تفعيل الكاميرا المباشرة.');
+      console.error("Camera recording error:", e);
+      alert('لا يمكن تفعيل الكاميرا المباشرة. يرجى التأكد من إعطاء صلاحيات الكاميرا والمايكروفون للموقع.');
     }
   };
 
   const stopVideoRecording = () => {
-    if (videoRecorder && recordingVideo) {
-      videoRecorder.stop();
+    const activeRecorder = videoRecorderRef.current || videoRecorder;
+    if (activeRecorder) {
+      try {
+        activeRecorder.stop();
+      } catch (err) {
+        console.error("Error stopping recorder:", err);
+      }
       setRecordingVideo(false);
+      videoRecorderRef.current = null;
       if (videoStream) {
         videoStream.getTracks().forEach((track) => track.stop());
         setVideoStream(null);
@@ -824,6 +915,22 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
     }
   };
 
+  const sanitizeMediaBase64 = (base64: string | null): string | null => {
+    if (!base64) return null;
+    if (base64.startsWith('data:')) {
+      const parts = base64.split(',');
+      if (parts.length >= 2) {
+        const header = parts[0];
+        const data = parts.slice(1).join(',');
+        const mimeMatch = header.match(/^data:([a-zA-Z0-9-]+\/[a-zA-Z0-9-]+)/);
+        if (mimeMatch && mimeMatch[1]) {
+          return `data:${mimeMatch[1]};base64,${data}`;
+        }
+      }
+    }
+    return base64;
+  };
+
   // Saving All Media to database (Google Sheet + Drive Folder)
   const handleSaveCorrection = async () => {
     setSaving(true);
@@ -854,13 +961,13 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
       const audioFilename = `ملاحظات-${cleanName}-${submission.studentId}-درس-${submission.lessonNumber}-إرسال-${submission.audioSubmissionCount || 1}_${timestamp}.mp3`;
 
       await gasApi.saveAllMedia({
-        canvasBase64,
+        canvasBase64: sanitizeMediaBase64(canvasBase64),
         canvasFilename,
-        imageBase64: finalAdditionalImageBase64,
+        imageBase64: sanitizeMediaBase64(finalAdditionalImageBase64),
         imageFilename,
-        videoBase64: additionalVideo,
+        videoBase64: sanitizeMediaBase64(additionalVideo),
         videoFilename,
-        audioBase64: additionalAudio,
+        audioBase64: sanitizeMediaBase64(additionalAudio),
         audioFilename,
         row: submission.row,
         notes,
@@ -895,6 +1002,15 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
   const handleLocalVideoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    // Safety maximum size limit of 10MB
+    const sizeInMB = file.size / (1024 * 1024);
+    if (sizeInMB > 10) {
+      alert(`عذراً، حجم ملف الفيديو المختار كبير جداً (${sizeInMB.toFixed(1)} ميجابايت). الحد الأقصى المسموح به هو 10 ميجابايت لضمان الحفظ بنجاح دون مشاكل.`);
+      e.target.value = ''; // clear input
+      return;
+    }
+
     const reader = new FileReader();
     reader.onload = (event: any) => {
       setAdditionalVideo(event.target.result);
@@ -1469,6 +1585,10 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                                   muted
                                   className="w-full rounded-xl object-cover"
                                 />
+                                <div className="absolute top-4 left-4 bg-rose-600/90 text-white text-[11px] font-bold px-3 py-1 rounded-full flex items-center gap-1.5 shadow-lg animate-pulse">
+                                  <span className="w-2 h-2 rounded-full bg-white"></span>
+                                  <span>جاري تسجيل الفيديو: {videoRecordDuration} / 45 ثانية</span>
+                                </div>
                               </div>
                             )}
 
@@ -1594,20 +1714,31 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                   <span className="text-[11px] font-bold text-emerald-400 flex items-center gap-1">
                     <Sparkles className="h-3.5 w-3.5" /> مشغل تلاوة الطالب
                   </span>
-                  <button
-                    id="btn-reload-audio-v2"
-                    onClick={loadAudioLesson}
-                    className="p-1.5 bg-slate-950/80 hover:bg-slate-800 text-[10px] text-slate-400 rounded-lg flex items-center gap-1 border border-slate-800/80"
-                    title="إعادة تحميل الصوت"
-                  >
-                    <RotateCw className="h-3 w-3" /> إعادة تحميل
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={fetchAudioAsBase64}
+                      className="p-1.5 bg-emerald-950/50 hover:bg-emerald-900/50 text-[10px] text-emerald-400 rounded-lg flex items-center gap-1 border border-emerald-800/40"
+                      title="تشغيل بديل عبر السيرفر لتجاوز قيود المتصفح"
+                    >
+                      تشغيل عبر السيرفر (Base64) 🌐
+                    </button>
+                    <button
+                      id="btn-reload-audio-v2"
+                      onClick={loadAudioLesson}
+                      className="p-1.5 bg-slate-950/80 hover:bg-slate-800 text-[10px] text-slate-400 rounded-lg flex items-center gap-1 border border-slate-800/80"
+                      title="إعادة تحميل الصوت"
+                    >
+                      <RotateCw className="h-3 w-3" /> إعادة تحميل
+                    </button>
+                  </div>
                 </div>
 
-                {loadingAudio ? (
+                {loadingAudio || isFallbackLoading ? (
                   <div className="py-12 flex flex-col justify-center items-center gap-3">
                     <div className="animate-spin rounded-full h-8 w-8 border-4 border-slate-800 border-t-emerald-500" />
-                    <p className="text-xs text-slate-400">جاري جلب الملف الصوتي من درايف...</p>
+                    <p className="text-xs text-slate-400">
+                      {isFallbackLoading ? "جاري سحب الصوت عبر السيرفر وتشغيله بأمان..." : "جاري جلب الملف الصوتي من درايف..."}
+                    </p>
                   </div>
                 ) : resolvedAudioSrc ? (
                   <div className="space-y-6">
@@ -1634,6 +1765,18 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                       </span>
                     </div>
 
+                    {audioError && (
+                      <div className="p-3 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-xl text-[11px] flex flex-col gap-2">
+                        <span>⚠️ {audioError}</span>
+                        <button
+                          onClick={fetchAudioAsBase64}
+                          className="self-start py-1 px-3 bg-rose-600/20 hover:bg-rose-600/35 border border-rose-500/30 text-rose-300 rounded-lg text-[10px] transition-colors font-bold"
+                        >
+                          محاولة تشغيل بديلة آمنة 🌐
+                        </button>
+                      </div>
+                    )}
+
                     {/* HTML Audio element */}
                     <audio
                       ref={audioRef}
@@ -1641,6 +1784,7 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                       onTimeUpdate={() => setCurrentTime(audioRef.current?.currentTime || 0)}
                       onLoadedMetadata={() => setDuration(audioRef.current?.duration || 0)}
                       onEnded={() => setIsPlaying(false)}
+                      onError={handleAudioError}
                       className="hidden"
                     />
 
@@ -2519,6 +2663,10 @@ export default function CorrectionWorkspace({ submission, onBack }: CorrectionWo
                                   muted
                                   className="w-full rounded-xl object-cover"
                                 />
+                                <div className="absolute top-4 left-4 bg-rose-600/90 text-white text-[11px] font-bold px-3 py-1 rounded-full flex items-center gap-1.5 shadow-lg animate-pulse">
+                                  <span className="w-2 h-2 rounded-full bg-white"></span>
+                                  <span>جاري تسجيل الفيديو: {videoRecordDuration} / 45 ثانية</span>
+                                </div>
                               </div>
                             )}
 
